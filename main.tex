@@ -1,0 +1,196 @@
+% ----------------------------------------------------
+% VARIABLES
+% ----------------------------------------------------
+
+\def \myPlace{FH JOANNEUM - University of Applied Sciences}
+\def \myTitle{Die Kunst ein korrektes Deckblatt zu formatieren}
+\def \mySubtitle{Ein anschauliches Beispiel}
+\def \myStudy{Software and Digital Experience Engineering}
+\def \myName{Kim Mustermensch, BSc}
+\def \myAdvisor{DI Dr. Martina Musterfrau}
+\def \myExternalAdvisor{John Doe, PhD}
+\def \myDate{Graz, 2025}
+
+% ----------------------------------------------------
+% PACKAGES
+% ----------------------------------------------------
+
+\documentclass[12pt,a4paper]{report}
+\usepackage[ngerman]{babel} % Dokumentensprache auf Deutsch setzen
+\usepackage[left=3.5cm, right=3cm, top=3cm, bottom=3cm]{geometry}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage{graphicx}
+\usepackage{setspace}
+\usepackage{tocloft}  % Für die Inhaltsverzeichnisformatierung
+\usepackage{amsmath}
+\usepackage{caption}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{pdfpages}
+\usepackage[sfdefault]{carlito} % Ersatz für Calibri, sieht fast genau gleich aus
+\usepackage[backend=biber,style=apa,hyperref=true]{biblatex}
+\usepackage{csquotes}
+\usepackage{hyperref}
+
+% ----------------------------------------------------
+% SETTINGS
+% ----------------------------------------------------
+
+% Bibtex settings
+\addbibresource{sources.bib}
+
+% Entferne Einrückung im Inhaltsverzeichnis
+\cftsetindents{section}{0em}{2em}   % Entfernt Einrückung für Sections
+\cftsetindents{subsection}{2em}{2em} % Einrückung für Subsections (optional)
+\cftsetindents{subsubsection}{4em}{2em} % Einrückung für Subsections (optional)
+
+% Formatierung Inhaltsverzeichnis
+\renewcommand{\cftsecdotsep}{\cftdotsep}
+\renewcommand{\cftpartleader}{\cftdotfill{\cftdotsep}}
+\renewcommand{\cftchapleader}{\cftdotfill{\cftdotsep}}
+\renewcommand{\cftsecleader}{\cftdotfill{\cftdotsep}}
+\renewcommand{\cftsubsecleader}{\cftdotfill{\cftdotsep}}
+
+% Kopf- und Fußzeilen
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\nouppercase{\rightmark}} % \rightmark gibt die aktuelle Section wieder
+\fancyfoot[C]{\thepage}
+
+% Stil für Kopfzeile ausblenden
+\fancypagestyle{nohead}{%
+  \fancyhf{} % Kopf- und Fußzeile leeren
+  \renewcommand{\headrulewidth}{0pt} % Kopfzeilenlinie entfernen
+  \fancyfoot[C]{\thepage} % Seitennummer beibehalten
+}
+
+% Absatzformatierung
+\setlength{\parskip}{6pt}
+\setlength{\parindent}{0pt}
+
+% Trennlinie für Fußnoten
+\renewcommand{\footnoterule}{\rule{5cm}{0.4pt}\vspace{4pt}}
+
+% Nummerierung der Sections ohne Kapitelnummer
+\renewcommand{\thesection}{\arabic{section}}
+
+\setcounter{tocdepth}{3}
+\setcounter{secnumdepth}{3} % Subsubsections bekommen auch eine Nummer
+
+% ----------------------------------------------------
+% DOCUMENT
+% ----------------------------------------------------
+
+\setlength{\headheight}{14.49998pt}
+\begin{document}
+
+% Deckblatt
+\include{content/01_Deckblatt}
+
+% Ab hier römische Seitenzahlen für Verzeichnisse
+\pagenumbering{roman}
+\pagestyle{plain}
+
+% Sperrvermerk (keine Kopfzeile, keine Linie)
+\newpage
+\phantomsection
+\section*{Sperrvermerk}
+\addcontentsline{toc}{section}{Sperrvermerk}
+Hier steht der Sperrvermerk.
+
+% Ehrenwörtliche Erklärung (keine Kopfzeile, keine Linie)
+\newpage
+\phantomsection
+\section*{Ehrenwörtliche Erklärung}
+\addcontentsline{toc}{section}{Ehrenwörtliche Erklärung}
+Hier steht die ehrenwörtliche Erklärung.
+
+% Danksagung/Widmung (keine Kopfzeile, aber Fußzeile mit Seitenzahl)
+\newpage
+\phantomsection
+\section*{Danksagung/Widmung}
+\addcontentsline{toc}{section}{Danksagung/Widmung}
+Hier kann die Danksagung oder Widmung stehen.
+
+\include{content/02_Verzeichnisse}
+
+% Kurzfassung und Abstract (keine Kopfzeile, keine Linie)
+\newpage
+\phantomsection
+\section*{Kurzfassung}
+\addcontentsline{toc}{section}{Kurzfassung}
+Hier steht die Kurzfassung auf Deutsch.
+
+\phantomsection
+\section*{Abstract}
+\addcontentsline{toc}{section}{Abstract}
+Here is the abstract in English.
+
+% Nach dem Abstract auf arabische Seitenzahlen umstellen
+\newpage
+\pagenumbering{arabic}
+
+% Ab hier eine Kopfzeile und eine Linie
+\pagestyle{fancy}  % Ab der Einleitung mit Kopfzeile
+\setcounter{section}{0}
+
+\pagestyle{fancy}  % Kopfzeile und Linie wieder aktiv
+\fancyhead[L]{\nouppercase{\rightmark}} % Kopfzeile mit aktueller Section
+\renewcommand{\headrulewidth}{0.4pt}  % Setze die Linie in der Kopfzeile wieder auf 0.4pt
+
+% Kapitel der Arbeit
+\include{content/10_Einleitung}
+\include{content/20_Hintergrund}
+\include{content/30_Methodik}
+\include{content/40_Ergebnisse}
+\include{content/50_Diskussion}
+
+\newpage
+\appendix
+
+% Anhang (keine Kopfzeile, keine Linie)
+\thispagestyle{nohead} % Kopfzeile nur auf dieser Seite ausblenden
+\phantomsection
+\section*{Anhang}
+\addcontentsline{toc}{section}{Anhang}
+Hier steht der Anhang.
+
+% Glossar (keine Kopfzeile, keine Linie)
+\newpage
+\thispagestyle{nohead} % Kopfzeile nur auf dieser Seite ausblenden
+\phantomsection
+\section*{Glossar}
+\addcontentsline{toc}{section}{Glossar}
+Hier steht das Glossar.
+
+% Literaturverzeichnis (keine Kopfzeile, keine Linie)
+\newpage
+\thispagestyle{nohead} % Kopfzeile nur auf dieser Seite ausblenden
+\phantomsection
+\section*{Literaturverzeichnis}
+\addcontentsline{toc}{section}{Literaturverzeichnis}
+\printbibliography[heading=none]
+
+% Stichwortverzeichnis (keine Kopfzeile, keine Linie)
+\newpage
+\thispagestyle{nohead} % Kopfzeile nur auf dieser Seite ausblenden
+\phantomsection
+\section*{Stichwortverzeichnis}
+\addcontentsline{toc}{section}{Stichwortverzeichnis}
+Hier steht das Stichwortverzeichnis.
+
+% Anlagen (keine Kopfzeile, keine Linie)
+\newpage
+\thispagestyle{nohead} % Kopfzeile nur auf dieser Seite ausblenden
+\phantomsection
+\section*{Anlagen}
+\addcontentsline{toc}{section}{Anlagen}
+Hier sind die Anlagen.
+
+\end{document}
+
+% ----------------------------------------------------
+% Diese Vorlage wurde von Vanessa Reiter und Andreas Feichtinger erstellt.
+% Anpassung für die Bachelorarbeit von Georg Mittenecker
+% ----------------------------------------------------

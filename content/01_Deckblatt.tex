@@ -1,0 +1,68 @@
+% ----------------------------------------------------
+% Hier sollte nichts verändert werden außer bei Änderung der Sprache.
+% Es gibt Variablen im main.tex File.
+% ----------------------------------------------------
+
+\begin{titlepage}
+
+  \begin{center}
+
+    % FH Joanneum Branding
+    \bf{\myPlace}
+
+    \vspace{2.0cm}
+
+    % Titel der Arbeit
+    \bf{\myTitle}
+
+    % Untertitel der Arbeit
+    \ifdef{\mySubtitle}{
+      \bf{\mySubtitle}
+    }{}
+
+    \vspace{2.0cm}
+
+    % Bachelorarbeit Beschreibung
+    \bf{
+      Bachelorarbeit
+
+      zur Erlangung des akademischen Grades
+
+      „Bachelor of Science in Engineering“
+
+      eingereicht am Studiengang Wirtschaftsinformatik
+
+      Studienrichtung: \myStudy
+    }
+
+    \vspace{2.0cm}
+
+    % Autor:in
+    \bf{Verfasst von: \myName}
+
+    \vspace{2.0cm}
+
+    % Betreuung
+    \bf{Betreuung: \myAdvisor}
+
+    % Externe Betreuung
+    \ifdef{\myExternalAdvisor}{
+      \bf{Firmenbetreuung: \myExternalAdvisor}
+    }{
+    }
+
+    \vspace{2.0cm}
+
+    % Ort und Datum
+    \bf{\myDate}
+
+    \vspace{2.0cm}
+
+    % FH Joanneum Logo
+    \includegraphics[height=3cm]{assets/images/FH_LOGO}
+
+  \end{center}
+
+\end{titlepage}
+
+%**********************************************************************

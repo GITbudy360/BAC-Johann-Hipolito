@@ -1,0 +1,56 @@
+% Inhaltsverzeichnis
+\newpage
+\pagestyle{empty}
+\renewcommand{\contentsname}{} % Entfernt die Standardüberschrift
+\phantomsection
+\section*{Inhaltsverzeichnis}
+\addcontentsline{toc}{section}{Inhaltsverzeichnis} % Fügt zum Inhaltsverzeichnis hinzu
+\vspace{-3cm} % Abstand verringern
+\tableofcontents
+\newpage
+
+% Abbildungsverzeichnis
+\newpage
+\pagestyle{empty}
+\renewcommand{\listfigurename}{} % Entfernt die Standardüberschrift
+\phantomsection
+\section*{Abbildungsverzeichnis}
+\addcontentsline{toc}{section}{Abbildungsverzeichnis} % Fügt zum Inhaltsverzeichnis hinzu
+\vspace{-1.5cm} % Abstand verringern
+\listoffigures
+\newpage
+
+% Tabellenverzeichnis
+\newpage
+\pagestyle{empty}
+\renewcommand{\listtablename}{} % Entfernt die Standardüberschrift
+\phantomsection
+\section*{Tabellenverzeichnis}
+\addcontentsline{toc}{section}{Tabellenverzeichnis}
+\vspace{-1.5cm} % Abstand verringern
+\listoftables
+\newpage
+
+% Abkürzungsverzeichnis (keine Kopfzeile, keine Linie)
+\newpage
+\pagestyle{fancy} % Hier wieder auf fancy stellen, um Seitenzahlen zu zeigen
+\fancyhead{}
+\renewcommand{\headrulewidth}{0pt}  % Entfernt die Linie in der Kopfzeile
+\phantomsection
+\section*{Abkürzungsverzeichnis}
+\addcontentsline{toc}{section}{Abkürzungsverzeichnis}
+Hier steht das Abkürzungsverzeichnis.
+
+% Symbolverzeichnis (keine Kopfzeile, keine Linie)
+\newpage
+\phantomsection
+\section*{Symbolverzeichnis}
+\addcontentsline{toc}{section}{Symbolverzeichnis}
+Hier steht das Symbolverzeichnis.
+
+% Formelverzeichnis (keine Kopfzeile, keine Linie)
+\newpage
+\phantomsection
+\section*{Formelverzeichnis}
+\addcontentsline{toc}{section}{Formelverzeichnis}
+Hier steht das Formelverzeichnis.
