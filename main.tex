@@ -86,34 +86,34 @@
 \begin{document}
 
 % Deckblatt
-\include{content/01_Deckblatt}
+\include{content/01_Cover_Page}
 
 % Ab hier römische Seitenzahlen für Verzeichnisse
 \pagenumbering{roman}
 \pagestyle{plain}
 
 % Sperrvermerk (keine Kopfzeile, keine Linie)
-\newpage
-\phantomsection
-\section*{Sperrvermerk}
-\addcontentsline{toc}{section}{Sperrvermerk}
-Hier steht der Sperrvermerk.
+%\newpage
+%\phantomsection
+%\section*{Sperrvermerk}
+%\addcontentsline{toc}{section}{Sperrvermerk}
+%Hier steht der Sperrvermerk.
 
 % Ehrenwörtliche Erklärung (keine Kopfzeile, keine Linie)
-\newpage
-\phantomsection
-\section*{Ehrenwörtliche Erklärung}
-\addcontentsline{toc}{section}{Ehrenwörtliche Erklärung}
-Hier steht die ehrenwörtliche Erklärung.
+%\newpage
+%\phantomsection
+%\section*{Ehrenwörtliche Erklärung}
+%\addcontentsline{toc}{section}{Ehrenwörtliche Erklärung}
+%Hier steht die ehrenwörtliche Erklärung.
 
 % Danksagung/Widmung (keine Kopfzeile, aber Fußzeile mit Seitenzahl)
-\newpage
-\phantomsection
-\section*{Danksagung/Widmung}
-\addcontentsline{toc}{section}{Danksagung/Widmung}
-Hier kann die Danksagung oder Widmung stehen.
+%\newpage
+%\phantomsection
+%\section*{Danksagung/Widmung}
+%\addcontentsline{toc}{section}{Danksagung/Widmung}
+%Hier kann die Danksagung oder Widmung stehen.
 
-\include{content/02_Verzeichnisse}
+\include{content/02_Tables}
 
 % Kurzfassung und Abstract (keine Kopfzeile, keine Linie)
 \newpage
@@ -140,11 +140,15 @@ Here is the abstract in English.
 \renewcommand{\headrulewidth}{0.4pt}  % Setze die Linie in der Kopfzeile wieder auf 0.4pt
 
 % Kapitel der Arbeit
-\include{content/10_Einleitung}
-\include{content/20_Hintergrund}
-\include{content/30_Methodik}
-\include{content/40_Ergebnisse}
-\include{content/50_Diskussion}
+\include{content/10_Introduction}
+\include{content/20_Background}
+\include{content/30_Kubernetes}
+\include{content/40_Scaling_Databases}
+\include{content/50_Redis}
+\include{content/60_Autoscaling_in_Kubernetes}
+\include{content/70_Experiment_Architecture}
+\include{content/80_Results}
+\include{content/90_Discussion}
 
 \newpage
 \appendix
