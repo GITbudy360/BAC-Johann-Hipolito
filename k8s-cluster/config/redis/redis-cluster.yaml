@@ -1,0 +1,26 @@
+apiVersion: databases.spotahome.com/v1 # Adjust based on your specific Operator
+kind: RedisFailover # Or RedisCluster
+metadata:
+  name: leaderboard-cache
+spec:
+  sentinel:
+    replicas: 3
+  redis:
+    replicas: 6 # 3 Masters + 3 Replicas
+    resources:
+      requests:
+        cpu: "200m"
+        memory: "512Mi"
+      limits:
+        cpu: "500m"
+        memory: "1Gi"
+    affinity:
+      podAntiAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchExpressions:
+            - key: app
+              operator: In
+              values:
+              - redis-cluster
+          topologyKey: "kubernetes.io/hostname" # Forces 1 pod per physical node

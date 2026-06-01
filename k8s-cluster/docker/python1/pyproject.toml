@@ -1,9 +1,0 @@
-[project]
-name = "python1"
-version = "0.1.0"
-description = "Add your description here"
-requires-python = ">=3.12.6"
-dependencies = [
-    "redis",
-    "fastapi",
-]

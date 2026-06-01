@@ -1,0 +1,22 @@
+USER-SUPPLIED VALUES:
+kubeControllerManager:
+  enabled: false
+kubeEtcd:
+  enabled: false
+kubeProxy:
+  enabled: false
+kubeScheduler:
+  enabled: false
+# 1. Grafana Configuration
+grafana:
+  service:
+    type: NodePort # Change to LoadBalancer if preferred
+
+# 2. Prometheus Configuration
+prometheus:
+  service:
+    type: NodePort # Change to LoadBalancer if preferred
+
+  # (Keep your remote write config here for k6)
+  prometheusSpec:
+    enableRemoteWriteReceiver: true

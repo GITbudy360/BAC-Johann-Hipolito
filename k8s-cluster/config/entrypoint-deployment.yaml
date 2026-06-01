@@ -1,0 +1,48 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fastapi-entrypoint
+  labels:
+    app: entrypoint
+spec:
+  replicas: 3 # Start with 3 replicas distributed across your cluster nodes
+  selector:
+    matchLabels:
+      app: entrypoint
+  template:
+    metadata:
+      labels:
+        app: entrypoint
+    spec:
+      containers:
+      - name: fastapi
+        image: dockbudy360/fastapi-entrypoint:v2 # Replace with your actual image
+        ports:
+        - containerPort: 8000
+        env:
+        - name: REDIS_HOST
+          # Update this to match the exact Service name created by your Redis Operator
+          value: "redis-cluster-service" 
+        - name: REDIS_PORT
+          value: "6379"
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+          limits:
+            cpu: "250m"
+            memory: "256Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fastapi-entrypoint-svc
+spec:
+  type: NodePort
+  selector:
+    app: entrypoint
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8000
+      nodePort: 30080 # Exposes the service on port 30080 on all cluster nodes
