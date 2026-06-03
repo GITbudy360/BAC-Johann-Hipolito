@@ -9,14 +9,22 @@
 \def \myName{Johann Krischan Hipolito}
 \def \myAdvisor{Michael Nestler}
 %\def \myExternalAdvisor{John Doe, PhD}
-\def \myDate{Graz, 2025}
+\def \myDate{Graz, 2026}
 
 % ----------------------------------------------------
 % PACKAGES
 % ----------------------------------------------------
 
 \documentclass[12pt,a4paper]{report}
-\usepackage[ngerman]{babel} % Dokumentensprache auf Deutsch setzen
+\usepackage{listings}       % for \begin{lstlisting}
+\lstset{
+  breaklines=true,
+  breakatwhitespace=true, % Optional: only breaks at spaces, keeping commands intact
+  postbreak=\mbox{\textcolor{red}{$\hookrightarrow$}\space}, % Optional: adds a little arrow to show a line broke
+  basicstyle=\linespread{0.9}\ttfamily\footnotesize,
+}
+\usepackage{acronym}        % for \ac{HPA}, \acp{CRD} etc.
+\usepackage{siunitx} 
 \usepackage[left=3.5cm, right=3cm, top=3cm, bottom=3cm]{geometry}
 \usepackage{titlesec}
 \usepackage{fancyhdr}
@@ -141,14 +149,12 @@ Here is the abstract in English.
 
 % Kapitel der Arbeit
 \include{content/10_Introduction}
-\include{content/20_Background}
-\include{content/30_Kubernetes}
-\include{content/40_Scaling_Databases}
-\include{content/50_Redis}
-\include{content/60_Autoscaling_in_Kubernetes}
-\include{content/70_Experiment_Architecture}
-\include{content/80_Results}
-\include{content/90_Discussion}
+\include{content/20_Stateful_vs_Stateless_Scaling_in_Kubernetes}
+\include{content/21_Hypothesis}
+\include{content/30_Technologies_Used}
+\include{content/40_Experiment_Architecture}
+\include{content/50_Results}
+\include{content/60_Conclusion}
 
 \newpage
 \appendix

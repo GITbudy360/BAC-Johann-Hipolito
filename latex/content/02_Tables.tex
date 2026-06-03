@@ -3,8 +3,8 @@
 \pagestyle{empty}
 \renewcommand{\contentsname}{} % Entfernt die Standardüberschrift
 \phantomsection
-\section*{Inhaltsverzeichnis}
-\addcontentsline{toc}{section}{Inhaltsverzeichnis} % Fügt zum Inhaltsverzeichnis hinzu
+\section*{Table of Contents}
+\addcontentsline{toc}{section}{Table of Contents} % Fügt zum Inhaltsverzeichnis hinzu
 \vspace{-3cm} % Abstand verringern
 \tableofcontents
 \newpage
@@ -14,8 +14,8 @@
 \pagestyle{empty}
 \renewcommand{\listfigurename}{} % Entfernt die Standardüberschrift
 \phantomsection
-\section*{Abbildungsverzeichnis}
-\addcontentsline{toc}{section}{Abbildungsverzeichnis} % Fügt zum Inhaltsverzeichnis hinzu
+\section*{List of Figures}
+\addcontentsline{toc}{section}{List of Figures} % Fügt zum Inhaltsverzeichnis hinzu
 \vspace{-1.5cm} % Abstand verringern
 \listoffigures
 \newpage
@@ -25,8 +25,8 @@
 \pagestyle{empty}
 \renewcommand{\listtablename}{} % Entfernt die Standardüberschrift
 \phantomsection
-\section*{Tabellenverzeichnis}
-\addcontentsline{toc}{section}{Tabellenverzeichnis}
+\section*{List of Tables}
+\addcontentsline{toc}{section}{List of Tables}
 \vspace{-1.5cm} % Abstand verringern
 \listoftables
 \newpage
@@ -37,20 +37,28 @@
 \fancyhead{}
 \renewcommand{\headrulewidth}{0pt}  % Entfernt die Linie in der Kopfzeile
 \phantomsection
-\section*{Abkürzungsverzeichnis}
-\addcontentsline{toc}{section}{Abkürzungsverzeichnis}
-Hier steht das Abkürzungsverzeichnis.
+\section*{List of Abbreviations}
+\addcontentsline{toc}{section}{List of Abbreviations}
+\begin{acronym}[YAML]   % longest acronym goes in brackets for alignment
+    \acro{API}{Application Programming Interface}
+    \acro{YAML}{YAML Ain't Markup Language}
+    \acro{KEDA}{Kubernetes Event-Driven Autoscaling}
+    \acro{CRD}{Custom Resource Definition}
+    \acro{HTTP}{Hypertext Transfer Protocol}
+    \acro{HPA}{Horizontal Pod Autoscalar}
+    \acro{JS}{JavaScript}
+\end{acronym}
 
 % Symbolverzeichnis (keine Kopfzeile, keine Linie)
 \newpage
 \phantomsection
-\section*{Symbolverzeichnis}
-\addcontentsline{toc}{section}{Symbolverzeichnis}
+\section*{List of Symbols}
+\addcontentsline{toc}{section}{List of Symbols}
 Hier steht das Symbolverzeichnis.
 
 % Formelverzeichnis (keine Kopfzeile, keine Linie)
 \newpage
 \phantomsection
-\section*{Formelverzeichnis}
-\addcontentsline{toc}{section}{Formelverzeichnis}
+\section*{List of Formulas}
+\addcontentsline{toc}{section}{List of Formulas}
 Hier steht das Formelverzeichnis.

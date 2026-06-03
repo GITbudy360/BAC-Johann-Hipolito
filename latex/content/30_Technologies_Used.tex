@@ -1,0 +1,156 @@
+\newpage
+% ============================================================
+%  SECTION: Technologies Used
+% ============================================================
+
+\section{Technologies}
+\label{sec:technologies}
+
+This section provides a brief overview of each technology that constitutes the
+experimental infrastructure used in this thesis. Together these components form
+a reproducible, cloud-native testbed for evaluating the two autoscaling
+strategies under investigation.
+
+% ------------------------------------------------------------
+\subsection{K3s}
+\label{subsec:k3s}
+
+K3s is a CNCF-certified, lightweight Kubernetes distribution developed by
+Rancher. It packages the full Kubernetes control plane into a single binary of
+less than 70~MB and eliminates several heavyweight dependencies of upstream
+Kubernetes, making it well-suited for resource-constrained environments such as
+edge devices, IoT deployments, and developer workstations (\cite{k3s:docs}).
+Despite its reduced footprint, K3s is fully conformant with the Kubernetes API
+and supports the complete set of Kubernetes primitives required by this thesis,
+including \textit{StatefulSets}, \textit{CustomResourceDefinitions}, and Helm
+chart deployments. K3s serves as the cluster management layer for all
+infrastructure described in this thesis.
+
+% ------------------------------------------------------------
+\subsection{FastAPI}
+\label{subsec:fastapi}
+
+FastAPI is a modern, high-performance Python web framework designed for
+building RESTful APIs. It is built on top of \textit{Starlette} for its
+web-server layer and \textit{Pydantic} for data validation, and it uses Python
+type hints to enable automatic request validation and interactive OpenAPI
+documentation generation (\cite{fastapi:docs}). FastAPI is built around the
+Asynchronous Server Gateway Interface (ASGI), enabling non-blocking I/O
+operations that are especially advantageous in workloads involving concurrent
+database or cache interactions (\cite{fastapi:async}). In the context of this
+thesis, a FastAPI application serves as the \ac{HTTP} entrypoint to the cluster,
+receiving incoming requests from the external load generator and routing read
+and write operations to the Redis Cluster backend.
+
+% ------------------------------------------------------------
+\subsection{Redis Cluster}
+\label{subsec:redis}
+
+Redis is an open-source, in-memory data structure store widely used as a
+cache, session store, and real-time data platform (\cite{redis:io}). The Redis
+Cluster topology used in this thesis distributes data across multiple primary
+nodes using a hash-slot-based sharding mechanism. The full keyspace is divided
+into \num{16384} hash slots, each assigned to a primary node, and each primary
+is optionally backed by one or more replica nodes for fault tolerance
+(\cite{redis:clusterspec}). Redis Cluster provides high availability through
+automatic failover: if a primary becomes unreachable, one of its replicas is
+promoted. In this thesis, the Redis Cluster is deployed as a Kubernetes
+\textit{StatefulSet} with a minimum of three primary nodes and forms the core
+stateful workload under performance evaluation.
+
+% ------------------------------------------------------------
+\subsection{Horizontal Pod Autoscaler (HPA)}
+\label{subsec:hpa}
+
+The Horizontal Pod Autoscaler is a built-in Kubernetes controller that
+automatically adjusts the number of pod replicas in a workload based on
+observed resource metrics, most commonly CPU and memory utilisation
+(\cite{kubernetes:autoscaling}). The HPA periodically queries the Kubernetes
+Metrics Server (or a custom metrics adapter) and computes a desired replica
+count proportional to the ratio of current to target utilisation. Its
+synchronisation loop runs every 15~seconds by default. While effective for
+many stateless use cases, the HPA is a fundamentally \textit{reactive}
+mechanism: scaling decisions are always downstream of observed resource
+conditions, making it vulnerable to the lag issues described in
+Section~\ref{subsec:stateful-challenges}. In this thesis, the HPA is deployed
+as the \textit{naive} baseline scaling strategy, configured to scale the Redis
+\textit{StatefulSet} in response to CPU and memory utilisation thresholds.
+
+% ------------------------------------------------------------
+\subsection{KEDA}
+\label{subsec:keda}
+
+Kubernetes Event-Driven Autoscaling (KEDA) is a CNCF-graduated open-source
+project that extends the Kubernetes HPA with the ability to scale workloads
+based on event sources and external metrics beyond simple CPU and memory
+(\cite{keda:home}). KEDA introduces the \textit{ScaledObject} custom resource,
+which declares a scaling target (such as a \textit{Deployment} or
+\textit{StatefulSet}), a polling interval, cooldown periods, and one or more
+\textit{scalers} that define the metric source (\cite{keda:scaledobjectspec}).
+When the configured metric from the scaler exceeds a threshold, KEDA adjusts
+the replica count of the target workload by updating the underlying HPA on the
+user's behalf. In this thesis, KEDA is configured with a Prometheus scaler
+that reads application-level metrics — such as request queue depth and cache
+hit ratio — directly from the Prometheus monitoring stack, enabling proactive,
+context-aware scaling decisions before resource exhaustion occurs
+(\cite{keda:prometheusscaler}).
+
+% ------------------------------------------------------------
+\subsection{Prometheus and Grafana}
+\label{subsec:observability}
+
+The observability stack in this thesis is deployed using the
+\textit{kube-prometheus-stack} Helm chart, which bundles Prometheus, Grafana,
+and Alertmanager into a single, opinionated release (\cite{artifacthub:kube-prometheus-stack}).
+\textit{Prometheus} is an open-source monitoring system and time-series
+database that collects metrics by periodically scraping HTTP endpoints exposed
+by instrumented targets (\cite{prometheus:overview}). In the Kubernetes context,
+it discovers scrape targets automatically via Kubernetes service discovery,
+collecting cluster-level metrics from \textit{kube-state-metrics} and
+\textit{node-exporter}, as well as application-level metrics from the FastAPI
+and Redis exporters. \textit{Grafana} is an open-source analytics and
+visualisation platform that queries Prometheus via its native data source
+integration and renders the collected time-series data as configurable
+dashboards (\cite{grafana:github}). Grafana dashboards are used throughout the
+experimental evaluation in this thesis to visualise autoscaling behaviour,
+latency distributions, and resource utilisation over time. Crucially, the
+Prometheus instance also acts as the external metric backend for the KEDA
+Prometheus scaler, creating a unified data path from application telemetry to
+autoscaling decisions.
+
+% ------------------------------------------------------------
+\subsection{Helm}
+\label{subsec:helm}
+
+Helm is the de-facto package manager for Kubernetes. It introduces the
+concept of a \textit{chart} — a collection of templated Kubernetes manifests
+that describe a deployable application — and a \textit{release}, which is a
+running instance of a chart in a cluster (\cite{helm:docs}). Helm charts enable
+repeatable, version-controlled deployments with configurable values overrides
+and built-in rollback support, significantly reducing the operational
+complexity of deploying multi-resource applications such as the
+\textit{kube-prometheus-stack}. In this thesis, Helm is used to deploy the
+observability stack, and the deployment configurations are parameterised
+through values files that are committed alongside the thesis infrastructure
+code.
+
+% ------------------------------------------------------------
+\subsection{Grafana k6}
+\label{subsec:k6}
+
+Grafana k6 is an open-source, developer-focused performance and load testing
+tool (\cite{k6:docs}). Tests in k6 are written as JavaScript modules, and k6
+executes them using a Go runtime which maps each \textit{virtual user} (VU)
+to a lightweight goroutine, enabling high concurrency with low resource
+overhead (\cite{k6:github}). k6 supports configurable test scenarios including
+ramp-up and ramp-down of virtual users over time, making it possible to
+simulate realistic traffic patterns such as gradual load increases, sustained
+peaks, and sudden spikes (\cite{k6:apitesting}). In the context of this thesis,
+k6 runs \textit{outside} the Kubernetes cluster as an independent load
+generator. It sends configurable volumes of HTTP traffic through the FastAPI
+entrypoint and into the Redis Cluster, producing the synthetic workload
+against which both autoscaling strategies — HPA and KEDA — are evaluated.
+The ability to precisely control the number of virtual users and the ramp
+profile makes k6 well-suited for generating reproducible, parameterised load
+scenarios that can isolate the performance characteristics of each scaling
+approach.

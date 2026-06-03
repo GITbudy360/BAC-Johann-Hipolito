@@ -1,0 +1,419 @@
+\newpage
+\section{Experiment Architecture}
+\label{sec:architecture}
+
+This section describes the end-to-end data flow of the experimental architecture,
+tracing the path of a synthetic load request from its origin in the load-generation
+layer through the application entrypoint, into the stateful data tier, and finally
+back through the observability and autoscaling subsystems.
+The two scaling strategies under investigation -- Horizontal Pod Autoscaler (HPA)
+and Kubernetes Event-Driven Autoscaling (KEDA) -- are treated as interchangeable
+modules in an otherwise identical pipeline, so that any measured performance
+difference can be attributed solely to the scaling mechanism.
+
+% ------------------------------------------------------------
+\subsection{Overview of the Test Pipeline}
+\label{sec:pipeline-overview}
+% ------------------------------------------------------------
+
+Figure~\ref{fig:data-flow} illustrates the high-level flow of the test pipeline.
+At the highest level the pipeline can be decomposed into four logical layers:
+
+\begin{enumerate}
+    \item \textbf{Load generation} -- Grafana k6 produces configurable HTTP traffic
+          directed at the FastAPI entrypoint.
+    \item \textbf{Application tier} -- The FastAPI service receives requests,
+          performs application-level logic, and delegates state operations to the
+          Redis Cluster.
+    \item \textbf{Data tier} -- A three-node Redis Cluster (minimum) stores and
+          serves all key-value state required by the application.
+    \item \textbf{Control \& Observability plane} -- Prometheus scrapes metrics
+          from all components; Grafana visualises them; and either the HPA or a
+          KEDA \texttt{ScaledObject} acts on those metrics to adjust replica counts.
+\end{enumerate}
+
+\begin{figure}[ht]
+    \centering
+    % Insert architecture diagram here
+    \includegraphics[width=1\linewidth]{assets/images/high-level-architecture-overview-graph.jpg}
+    \caption{High-level data flow of the test pipeline.}
+    \label{fig:data-flow}
+\end{figure}
+
+% ------------------------------------------------------------
+\subsection{Physical Setup}
+\label{sec:physical-setup}
+% ------------------------------------------------------------
+
+The Kubernetes cluster is hosted on a k3s distribution running on 6 mini PCs provided by the professor, each equipped with a 4-core CPU and 8 GB of RAM. The cluster is configured with a single control-plane node and five worker nodes, providing a total of 20 CPU cores and 40 GB of RAM for the workloads and observability stack. The k3s distribution is chosen for its lightweight footprint, which allows it to run efficiently on resource-constrained hardware while still providing a suitable and easily configurable Kubernetes environment.
+
+Load testing is performed from an external virtual machine running Grafana k6, which is connected to the cluster via Remote Desktop Protocol (RDP). This setup simulates real-world conditions where load originates from outside the cluster, and it also ensures that the resource overhead of running k6 does not interfere with the performance of the cluster workloads.
+
+% ------------------------------------------------------------
+\subsection{Load Generation with Grafana k6}
+\label{sec:k6}
+% ------------------------------------------------------------
+
+Grafana k6 is an open-source, developer-friendly load-testing tool that executes
+test scripts written in JavaScript and emits detailed performance metrics
+\cite{k6:docs}.
+In the context of this thesis k6 acts as the sole source of synthetic load:
+a configurable test script ramps virtual users (VUs) up and down according to
+a predefined scenario, sending HTTP \texttt{POST} and \texttt{GET} requests to
+the FastAPI entrypoint.
+
+As mentioned in the previous section, Grafana k6 is used outside of the k3s cluster to simulate user traffic coming from outside of the network and to minimize the resource burden on the mini PCs provided by the professor.
+Upon completion k6 writes an end-of-test summary and, via setting the 
+\texttt{enableRemoteWriteReceiver: true}, pushes time-series metrics
+directly into the Prometheus remote-write endpoint, making load-test results
+immediately available on the Grafana dashboard alongside cluster-level metrics.
+
+The k6 scenario is parameterised so that the same script can be applied without
+modification to both the HPA and KEDA experimental runs, ensuring test
+reproducibility.
+
+\subsubsection*{k6 Code}
+\label{sec:k6-code}
+
+\begin{lstlisting}[float=htbp, caption={k6 JS code},label={lst:k6-code}]
+import http from 'k6/http';
+import { check, sleep } from 'k6';
+import { randomString, randomIntBetween } from 'https://jslib.k6.io/k6-utils/1.2.0/index.js';
+
+// Configuration for the load test phases
+export const options = {
+  stages: [
+    { duration: '30s', target: 50 },  // Ramp up to 50 virtual users
+    { duration: '2m', target: 200 },  // Hold at 200 users to test scaling
+    { duration: '30s', target: 0 },   // Ramp down
+  ],
+};
+
+// Pass the Entrypoint API URL as an environment variable
+// Example: k6 run -e API_URL=http://<ENTRYPOINT_NODEPORT_IP> test.js
+const API_URL = __ENV.API_URL || 'http://localhost:8000';
+
+export default function () {
+  // Simulate an 80/20 split between writes (submitting scores) and reads (viewing leaderboard)
+  const isWrite = Math.random() < 0.8;
+
+  if (isWrite) {
+    const payload = JSON.stringify({
+      player_id: `player_${randomString(8)}`,
+      score: randomIntBetween(100, 10000),
+    });
+
+    const params = {
+      headers: { 'Content-Type': 'application/json' },
+    };
+
+    const res = http.post(`${API_URL}/score/`, payload, params);
+    
+    check(res, {
+      'score update status is 200': (r) => r.status === 200,
+    });
+  } else {
+    const res = http.get(`${API_URL}/leaderboard/`);
+    
+    check(res, {
+      'leaderboard fetch status is 200': (r) => r.status === 200,
+    });
+  }
+
+  // Brief pause to simulate human interaction time
+  sleep(0.1);
+}
+\end{lstlisting}
+
+
+The \ac{JS} code is used to generate user load against the FastAPI entrypoint during test runs.
+
+In order to run this test, the user would execute the following command in the terminal, replacing \verb|<ENTRYPOINT_NODEPORT_IP>| with the actual IP address of the FastAPI entrypoint, which in my case was \verb|192.168.1.101:30080|: 
+
+\verb|k6 run -e API_URL=http://192.168.1.101:30080 load-generation.js|
+
+% ------------------------------------------------------------
+\subsection{FastAPI Entrypoint}
+\label{sec:fastapi-entrypoint}
+% ------------------------------------------------------------
+
+The FastAPI application serves as the single ingress point for all traffic
+originating from k6 \cite{fastapi:docs}.
+FastAPI is built on Starlette and Uvicorn, giving it asynchronous request
+handling out of the box, which means that under high concurrency the process
+does not block while waiting for Redis replies.
+
+The service exposes two primary endpoints:
+
+\begin{itemize}
+    \item \textbf{\texttt{POST /task}} -- Accepts a JSON payload, serialises it,
+          and writes it to the Redis Cluster using a \texttt{LPUSH} command,
+          thereby enqueuing a unit of work.
+    \item \textbf{\texttt{GET /status}} -- Reads aggregate queue-length metrics
+          from Redis and returns them as a JSON response, allowing k6 to assert
+          on application state.
+\end{itemize}
+
+Inside the cluster the FastAPI \texttt{Deployment} is exposed via a
+\texttt{ClusterIP} \texttt{Service}.
+An \texttt{Ingress} resource (managed by the Traefik ingress controller bundled
+with k3s \cite{k3s:docs}) routes external traffic -- including the k6 \texttt{Job}
+traffic -- to the \texttt{ClusterIP} \texttt{Service}.
+
+\subsubsection*{FastAPI Deployment Manifest}
+\label{sec:fastapi-manifest}
+
+\begin{lstlisting}[caption={FastAPI Deployment and Service manifest.},
+                   label={lst:fastapi-deployment}]
+# TODO: insert FastAPI Deployment and Service manifest here
+\end{lstlisting}
+
+\subsubsection*{FastAPI Ingress Manifest}
+\label{sec:fastapi-ingress}
+
+\begin{lstlisting}[caption={FastAPI Ingress manifest.},
+                   label={lst:fastapi-ingress}]
+# TODO: insert FastAPI Ingress manifest here
+\end{lstlisting}
+
+% ------------------------------------------------------------
+\subsection{Redis Cluster -- Data Tier}
+\label{sec:redis-cluster-flow}
+% ------------------------------------------------------------
+
+All state produced or consumed by the FastAPI service is stored in a Redis Cluster
+consisting of a minimum of three primary nodes, each accompanied by one replica,
+deployed as a Kubernetes \texttt{StatefulSet} \cite{kubernetes:statefulset}.
+The \texttt{StatefulSet} controller guarantees stable network identities and
+ordered, graceful scaling operations -- both properties that are critical for
+Redis Cluster membership management, where each node must be explicitly added to
+or removed from the cluster topology \cite{kubernetes:statefulset}.
+
+Data is distributed across the three primaries using Redis's built-in hash-slot
+partitioning (16\,384 slots divided evenly among primaries).
+When the FastAPI service issues a \texttt{LPUSH} command the Redis client library
+hashes the key and routes the command to the responsible primary shard;
+replica nodes provide read scalability and automatic failover.
+
+The Redis Cluster is exposed within the cluster via a \emph{headless}
+\texttt{Service} (i.e.\ \texttt{clusterIP: None}), which allows the client
+library to resolve individual pod DNS names and perform slot-aware request routing.
+
+\subsubsection*{Redis StatefulSet Manifest}
+\label{sec:redis-statefulset-manifest}
+
+\begin{lstlisting}[caption={Redis Cluster StatefulSet manifest.},
+                   label={lst:redis-statefulset}]
+# TODO: insert Redis StatefulSet manifest here
+\end{lstlisting}
+
+\subsubsection*{Redis Headless Service Manifest}
+\label{sec:redis-service-manifest}
+
+\begin{lstlisting}[caption={Redis headless Service manifest.},
+                   label={lst:redis-service}]
+# TODO: insert Redis headless Service manifest here
+\end{lstlisting}
+
+% ------------------------------------------------------------
+\subsection{Autoscaling Layer}
+\label{sec:autoscaling-layer}
+% ------------------------------------------------------------
+
+The autoscaling layer is the primary variable in this experimental design.
+Two mutually exclusive configurations are deployed in separate test runs:
+the native Kubernetes HPA and a KEDA-based \texttt{ScaledObject}.
+Both configurations target the same \texttt{StatefulSet} (i.e.\ the Redis Cluster)
+and the same FastAPI \texttt{Deployment}, and both share the same minimum and
+maximum replica bounds to keep comparisons fair.
+
+\subsubsection{Naive Autoscaling -- Horizontal Pod Autoscaler}
+\label{sec:hpa-flow}
+
+The Kubernetes \ac{HPA} operates on a reactive control loop: at each sync period
+(default 15 seconds) it queries the Metrics Server for the current CPU and/or
+memory utilisation of the target workload, computes the desired replica count
+using the formula defined in the Kubernetes documentation \cite{kubernetes:hpa},
+and issues a scale command if the desired count differs from the current count.
+
+\begin{equation}
+    \text{desiredReplicas} =
+    \left\lceil
+        \text{currentReplicas} \times
+        \frac{\text{currentMetricValue}}{\text{desiredMetricValue}}
+    \right\rceil
+    \label{eq:hpa}
+\end{equation}
+
+This approach is \emph{reactive} by design: the HPA cannot scale out until the
+resource pressure has already manifested, which introduces an inherent lag between
+demand increase and the availability of additional capacity
+\cite{kubernetes:hpa}.
+For stateful workloads such as a Redis Cluster this lag is further compounded by
+the time required to initialise a new node, join the cluster, and rebalance
+hash slots -- a process that can take tens of seconds.
+
+\paragraph*{HPA Scaling Manifest}
+\label{sec:hpa-manifest}
+
+\begin{lstlisting}[caption={HorizontalPodAutoscaler manifest targeting the Redis StatefulSet.},
+                   label={lst:hpa}]
+# TODO: insert HPA manifest here
+\end{lstlisting}
+
+\subsubsection{Event-Driven Autoscaling -- KEDA}
+\label{sec:keda-flow}
+
+KEDA is a Cloud Native Computing Foundation (CNCF) graduated project that extends
+Kubernetes with event-driven autoscaling capabilities \cite{keda:docs}.
+It operates as a custom controller and introduces two new
+\acp{CRD}: \texttt{ScaledObject} (for long-running workloads) and
+\texttt{ScaledJob} (for batch workloads).
+
+In this architecture KEDA is configured with a \emph{Redis List scaler}, which
+polls the length of the task queue stored in Redis and exposes it as an external
+metric to the Kubernetes HPA subsystem \cite{keda:concepts}.
+This arrangement allows scaling decisions to be driven by the \emph{depth of the
+work queue} -- a leading indicator of load -- rather than by CPU or memory
+utilisation, which are lagging indicators.
+As a result KEDA can initiate a scale-out event \emph{before} the existing
+replicas become resource-saturated, reducing the latency penalty associated with
+naive reactive scaling.
+
+The KEDA operator also supports \emph{scale-to-zero}: when the Redis list length
+drops to zero for a configurable cooldown period, KEDA can reduce the replica
+count to zero, freeing cluster resources entirely -- a capability unavailable in
+the standard HPA.
+
+\paragraph*{KEDA ScaledObject Manifest}
+\label{sec:keda-manifest}
+
+\begin{lstlisting}[caption={KEDA ScaledObject manifest with Redis List scaler.},
+                   label={lst:keda-scaledobject}]
+# TODO: insert KEDA ScaledObject manifest here
+\end{lstlisting}
+
+% ------------------------------------------------------------
+\subsection{Observability Stack}
+\label{sec:observability-flow}
+% ------------------------------------------------------------
+
+The observability stack is built on the \texttt{kube-prometheus-stack} Helm chart,
+which bundles Prometheus, Alertmanager, and Grafana into a single, co-ordinated
+release \cite{prometheus:helm}.
+It is deployed into a dedicated \texttt{monitoring} namespace and remains
+identical across both experimental conditions.
+
+\paragraph{Prometheus.}
+Prometheus scrapes metrics from four distinct sources:
+
+\begin{enumerate}
+    \item \textbf{Kubernetes API server and kubelet} -- via
+          \texttt{ServiceMonitor} resources created automatically by the Helm chart.
+    \item \textbf{FastAPI application} -- via a \texttt{/metrics} endpoint
+          exposed by the \texttt{prometheus-fastapi-instrumentator} library;
+          a dedicated \texttt{ServiceMonitor} is created for this service.
+    \item \textbf{Redis Cluster} -- via the
+          \texttt{redis\_exporter} sidecar container, which translates Redis
+          \texttt{INFO} output into the Prometheus exposition format;
+          a \texttt{ServiceMonitor} targets the exporter port.
+    \item \textbf{Grafana k6} -- via the
+          \texttt{xk6-output-prometheus-remote} extension, which pushes k6
+          metrics to the Prometheus remote-write endpoint during test execution.
+\end{enumerate}
+
+\paragraph{Grafana.}
+Grafana is provisioned with two dashboards at deploy time via
+\texttt{ConfigMap}-based dashboard provisioning:
+
+\begin{itemize}
+    \item A \textbf{cluster overview} dashboard displaying pod counts, replica
+          counts of the FastAPI \texttt{Deployment} and the Redis
+          \texttt{StatefulSet}, CPU and memory utilisation, and HPA/KEDA
+          scaling events.
+    \item A \textbf{k6 load-test} dashboard displaying virtual user count,
+          request rate, response-time percentiles (\texttt{p50}, \texttt{p95},
+          \texttt{p99}), and error rate over time.
+\end{itemize}
+
+Together these two dashboards provide the primary data source for the
+quantitative comparison presented in Section~\ref{sec:results}.
+
+\subsubsection*{Prometheus Stack Helm Values Manifest}
+\label{sec:prometheus-values-manifest}
+
+\begin{lstlisting}[
+                   caption={Custom \texttt{values.yaml} for the kube-prometheus-stack Helm chart.},
+                   label={lst:prometheus-values}]
+# TODO: insert kube-prometheus-stack Helm values here
+\end{lstlisting}
+
+\subsubsection*{ServiceMonitor Manifests}
+\label{sec:servicemonitor-manifests}
+
+\begin{lstlisting}[
+                   caption={ServiceMonitor manifest for the FastAPI application.},
+                   label={lst:servicemonitor-fastapi}]
+# TODO: insert FastAPI ServiceMonitor manifest here
+\end{lstlisting}
+
+\begin{lstlisting}[
+                   caption={ServiceMonitor manifest for the Redis Exporter sidecar.},
+                   label={lst:servicemonitor-redis}]
+# TODO: insert Redis ServiceMonitor manifest here
+\end{lstlisting}
+
+% ------------------------------------------------------------
+\subsection{End-to-End Request Lifecycle}
+\label{sec:request-lifecycle}
+% ------------------------------------------------------------
+
+Bringing the individual layers together, a single request traverses the following
+sequence of hops during a test run:
+
+\begin{enumerate}
+    \item The k6 \texttt{Job} generates a virtual-user iteration and issues an
+          HTTP \texttt{POST} to the FastAPI \texttt{Ingress} endpoint.
+    \item The Traefik ingress controller routes the request to one of the
+          \texttt{FastAPI} pods via the \texttt{ClusterIP} \texttt{Service}.
+    \item The FastAPI handler serialises the request payload and executes an
+          \texttt{LPUSH} command against the Redis Cluster headless
+          \texttt{Service}.
+    \item The Redis client library resolves the target shard via DNS and
+          forwards the command to the responsible primary pod.
+    \item Redis acknowledges the write; the FastAPI handler returns an HTTP
+          \texttt{201 Created} response to k6.
+    \item The \texttt{prometheus-fastapi-instrumentator} increments the
+          relevant counters (request count, latency histogram); the Redis
+          exporter sidecar updates queue-length and connection gauges.
+    \item Prometheus scrapes both exporters on its configured interval
+          (default 15 seconds).
+    \item \textbf{HPA path:} The Metrics Server aggregates pod-level CPU/memory
+          data; the HPA controller reads from the Metrics Server API and
+          computes the desired replica count \cite{kubernetes:hpa}.\\
+          \textbf{KEDA path:} The KEDA operator reads the Redis list length
+          directly and exposes it as an external metric; the HPA subsystem
+          (driven by KEDA's Metrics Adapter) computes and applies the desired
+          replica count \cite{keda:concepts}.
+    \item If a scale-out decision is made, the Kubernetes scheduler places new
+          pods on available nodes; the \texttt{StatefulSet} controller
+          initialises them in ordinal order and, for Redis, the cluster
+          re-balances hash slots.
+    \item Grafana queries Prometheus and renders the updated dashboards in
+          near-real-time, providing the experimental observations recorded in
+          Section~\ref{sec:results}.
+\end{enumerate}
+
+% ------------------------------------------------------------
+\subsection{Summary}
+\label{sec:data-flow-summary}
+% ------------------------------------------------------------
+
+The pipeline described above is deliberately minimal: every component other than
+the autoscaling mechanism is held constant across the two experimental conditions.
+Grafana k6 produces a reproducible, parameterised load profile that stresses both
+the FastAPI tier and the Redis data tier in a controlled manner.
+The observability stack ensures that all relevant metrics -- queue depth, replica
+count, CPU/memory utilisation, and request latency -- are captured at sufficient
+resolution to support a rigorous quantitative comparison between the reactive,
+resource-driven HPA approach and the proactive, event-driven KEDA approach.
