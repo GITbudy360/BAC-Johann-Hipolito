@@ -41,7 +41,7 @@ to as K8s — emerged as the dominant container orchestration platform.
 Originally designed and used internally at Google as the \textit{Borg} system, Kubernetes
 was open-sourced in 2014 and donated to the Cloud Native Computing Foundation (CNCF),
 where it has since grown into the second-largest open-source project in the world
-(\cite{ibm:kuberneteshistory}). Kubernetes provides a declarative API for defining the
+(\cite{ibm:kuberneteshistory}). Kubernetes provides a declarative \ac{API} for defining the
 desired state of an application cluster; its control plane continuously reconciles the
 observed state of the system against this desired state, automatically scheduling pods,
 managing service discovery, and orchestrating storage (\cite{kubernetes:overview}).
@@ -91,7 +91,7 @@ stateful workloads, this lag can result in degraded performance, pod restarts, o
 cascading failures during traffic spikes (\cite{thoras:hpa}).
 
 An increasingly popular alternative is \textit{Kubernetes Event-Driven Autoscaling}
-(KEDA), a CNCF-graduated project that extends the standard HPA to support event- and
+(\ac{KEDA}), a CNCF-graduated project that extends the standard HPA to support event- and
 metric-driven scaling from a rich ecosystem of external sources, including message
 queues, databases, and custom Prometheus metrics (\cite{keda:home}; \cite{cncf:kedagrad}).
 By decoupling scaling decisions from simple resource utilisation and enabling them to
