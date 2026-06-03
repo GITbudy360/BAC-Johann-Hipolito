@@ -35,9 +35,19 @@ At the highest level the pipeline can be decomposed into four logical layers:
 \begin{figure}[ht]
     \centering
     % Insert architecture diagram here
+    \includegraphics[width=1\linewidth]{assets/images/high-level-architecture-overview-graph.jpg}
     \caption{High-level data flow of the test pipeline.}
     \label{fig:data-flow}
 \end{figure}
+
+% ------------------------------------------------------------
+\subsection{Physical Setup}
+\label{sec:physical-setup}
+% ------------------------------------------------------------
+
+The Kubernetes cluster is hosted on a k3s distribution running on 6 mini PCs provided by the professor, each equipped with a 4-core CPU and 8 GB of RAM. The cluster is configured with a single control-plane node and five worker nodes, providing a total of 20 CPU cores and 40 GB of RAM for the workloads and observability stack. The k3s distribution is chosen for its lightweight footprint, which allows it to run efficiently on resource-constrained hardware while still providing a suitable and easily configurable Kubernetes environment.
+
+Load testing is performed from an external virtual machine running Grafana k6, which is connected to the cluster via Remote Desktop Protocol (RDP). This setup simulates real-world conditions where load originates from outside the cluster, and it also ensures that the resource overhead of running k6 does not interfere with the performance of the cluster workloads.
 
 % ------------------------------------------------------------
 \subsection{Load Generation with Grafana k6}
@@ -52,11 +62,9 @@ a configurable test script ramps virtual users (VUs) up and down according to
 a predefined scenario, sending HTTP \texttt{POST} and \texttt{GET} requests to
 the FastAPI entrypoint.
 
-k6 is deployed as a \emph{Kubernetes Job} inside the same k3s cluster so that
-network latency between the load generator and the system under test is minimised
-and kept constant across both experimental conditions.
-Upon completion k6 writes an end-of-test summary and, via the
-\texttt{xk6-output-prometheus-remote} extension, pushes time-series metrics
+As mentioned in the previous section, Grafana k6 is used outside of the k3s cluster to simulate user traffic coming from outside of the network and to minimize the resource burden on the mini PCs provided by the professor.
+Upon completion k6 writes an end-of-test summary and, via setting the 
+\texttt{enableRemoteWriteReceiver: true}, pushes time-series metrics
 directly into the Prometheus remote-write endpoint, making load-test results
 immediately available on the Grafana dashboard alongside cluster-level metrics.
 
@@ -64,15 +72,65 @@ The k6 scenario is parameterised so that the same script can be applied without
 modification to both the HPA and KEDA experimental runs, ensuring test
 reproducibility.
 
-\subsubsection*{k6 Job Manifest}
-\label{sec:k6-manifest}
+\subsubsection*{k6 Code}
+\label{sec:k6-code}
 
-The following \ac{YAML} manifest defines the Kubernetes \texttt{Job} that runs the
-k6 load test:
+\begin{lstlisting}[float=htbp, caption={k6 JS code},label={lst:k6-code}]
+import http from 'k6/http';
+import { check, sleep } from 'k6';
+import { randomString, randomIntBetween } from 'https://jslib.k6.io/k6-utils/1.2.0/index.js';
 
-\begin{lstlisting}[caption={k6 Kubernetes Job manifest.},label={lst:k6-job}]
-# TODO: insert k6 Job manifest here
+// Configuration for the load test phases
+export const options = {
+  stages: [
+    { duration: '30s', target: 50 },  // Ramp up to 50 virtual users
+    { duration: '2m', target: 200 },  // Hold at 200 users to test scaling
+    { duration: '30s', target: 0 },   // Ramp down
+  ],
+};
+
+// Pass the Entrypoint API URL as an environment variable
+// Example: k6 run -e API_URL=http://<ENTRYPOINT_NODEPORT_IP> test.js
+const API_URL = __ENV.API_URL || 'http://localhost:8000';
+
+export default function () {
+  // Simulate an 80/20 split between writes (submitting scores) and reads (viewing leaderboard)
+  const isWrite = Math.random() < 0.8;
+
+  if (isWrite) {
+    const payload = JSON.stringify({
+      player_id: `player_${randomString(8)}`,
+      score: randomIntBetween(100, 10000),
+    });
+
+    const params = {
+      headers: { 'Content-Type': 'application/json' },
+    };
+
+    const res = http.post(`${API_URL}/score/`, payload, params);
+    
+    check(res, {
+      'score update status is 200': (r) => r.status === 200,
+    });
+  } else {
+    const res = http.get(`${API_URL}/leaderboard/`);
+    
+    check(res, {
+      'leaderboard fetch status is 200': (r) => r.status === 200,
+    });
+  }
+
+  // Brief pause to simulate human interaction time
+  sleep(0.1);
+}
 \end{lstlisting}
+
+
+The \ac{JS} code is used to generate user load against the FastAPI entrypoint during test runs.
+
+In order to run this test, the user would execute the following command in the terminal, replacing \verb|<ENTRYPOINT_NODEPORT_IP>| with the actual IP address of the FastAPI entrypoint, which in my case was \verb|192.168.1.101:30080|: 
+
+\verb|k6 run -e API_URL=http://192.168.1.101:30080 load-generation.js|
 
 % ------------------------------------------------------------
 \subsection{FastAPI Entrypoint}

@@ -17,9 +17,14 @@
 
 \documentclass[12pt,a4paper]{report}
 \usepackage{listings}       % for \begin{lstlisting}
+\lstset{
+  breaklines=true,
+  breakatwhitespace=true, % Optional: only breaks at spaces, keeping commands intact
+  postbreak=\mbox{\textcolor{red}{$\hookrightarrow$}\space}, % Optional: adds a little arrow to show a line broke
+  basicstyle=\linespread{0.9}\ttfamily\footnotesize,
+}
 \usepackage{acronym}        % for \ac{HPA}, \acp{CRD} etc.
 \usepackage{siunitx} 
-\usepackage[ngerman]{babel} % Dokumentensprache auf Deutsch setzen
 \usepackage[left=3.5cm, right=3cm, top=3cm, bottom=3cm]{geometry}
 \usepackage{titlesec}
 \usepackage{fancyhdr}

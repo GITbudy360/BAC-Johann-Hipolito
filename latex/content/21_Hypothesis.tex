@@ -9,7 +9,7 @@ implemented through a custom Kubernetes operator in combination with KEDA, is
 a superior method of scaling stateful workloads compared to the native HPA
 baseline.
 
-\paragraph{The Operator Pattern as a Foundation for Stateful Automation.}
+\subsection{The Operator Pattern as a Foundation for Stateful Automation.}
 The Kubernetes \textit{operator pattern} was conceived precisely to address the
 gap between the generic automation that Kubernetes provides out of the box and
 the deep, application-specific knowledge required to manage complex stateful
@@ -36,7 +36,7 @@ example, ensuring that a scale-out event is only issued once the cluster is
 fully healthy, and that the requisite resharding of hash slots is coordinated
 atomically with the scheduling of new \texttt{StatefulSet} pods.
 
-\paragraph{KEDA's Event-Driven Model as a Proactive Trigger.}
+\subsection{KEDA's Event-Driven Model as a Proactive Trigger.}
 Complementing the operator pattern, KEDA introduces an event-driven trigger
 layer that decouples scaling decisions from raw infrastructure metrics. By
 consuming application-level signals exposed via Prometheus — such as request
@@ -52,7 +52,7 @@ behaviour to be tuned to the specific performance characteristics of a Redis
 Cluster, where aggressive scale-in during low-traffic periods is inadvisable
 due to the cost of subsequent resharding.
 
-\paragraph{Supporting Evidence from the Literature.}
+\subsection{Supporting Evidence from the Literature.}
 The hypothesis is supported by a growing body of academic and industry
 research. Mondal et al.\ identified that the HPA's reliance on CPU and memory
 as lagging indicators makes it \enquote{incapable of foreseeing upcoming
@@ -79,7 +79,7 @@ workload-specific signals that vary with the demand pattern of the Redis
 Cluster, and it reduces manual threshold tuning by anchoring scaling decisions
 to semantically meaningful metrics.
 
-\paragraph{Scope and Expected Outcome.}
+\subsection{Scope and Expected Outcome.}
 Given this theoretical and empirical foundation, this thesis hypothesises that
 the KEDA-driven operator approach will exhibit measurably lower response
 latency under load spikes, fewer instances of cluster-level resource

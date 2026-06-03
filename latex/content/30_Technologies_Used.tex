@@ -22,7 +22,7 @@ Kubernetes, making it well-suited for resource-constrained environments such as
 edge devices, IoT deployments, and developer workstations (\cite{k3s:docs}).
 Despite its reduced footprint, K3s is fully conformant with the Kubernetes API
 and supports the complete set of Kubernetes primitives required by this thesis,
-including \texttt{StatefulSets}, \texttt{CustomResourceDefinitions}, and Helm
+including \textit{StatefulSets}, \textit{CustomResourceDefinitions}, and Helm
 chart deployments. K3s serves as the cluster management layer for all
 infrastructure described in this thesis.
 
@@ -55,7 +55,7 @@ is optionally backed by one or more replica nodes for fault tolerance
 (\cite{redis:clusterspec}). Redis Cluster provides high availability through
 automatic failover: if a primary becomes unreachable, one of its replicas is
 promoted. In this thesis, the Redis Cluster is deployed as a Kubernetes
-\texttt{StatefulSet} with a minimum of three primary nodes and forms the core
+\textit{StatefulSet} with a minimum of three primary nodes and forms the core
 stateful workload under performance evaluation.
 
 % ------------------------------------------------------------
@@ -74,7 +74,7 @@ mechanism: scaling decisions are always downstream of observed resource
 conditions, making it vulnerable to the lag issues described in
 Section~\ref{subsec:stateful-challenges}. In this thesis, the HPA is deployed
 as the \textit{naive} baseline scaling strategy, configured to scale the Redis
-\texttt{StatefulSet} in response to CPU and memory utilisation thresholds.
+\textit{StatefulSet} in response to CPU and memory utilisation thresholds.
 
 % ------------------------------------------------------------
 \subsection{KEDA}
@@ -83,9 +83,9 @@ as the \textit{naive} baseline scaling strategy, configured to scale the Redis
 Kubernetes Event-Driven Autoscaling (KEDA) is a CNCF-graduated open-source
 project that extends the Kubernetes HPA with the ability to scale workloads
 based on event sources and external metrics beyond simple CPU and memory
-(\cite{keda:home}). KEDA introduces the \texttt{ScaledObject} custom resource,
-which declares a scaling target (such as a \texttt{Deployment} or
-\texttt{StatefulSet}), a polling interval, cooldown periods, and one or more
+(\cite{keda:home}). KEDA introduces the \textit{ScaledObject} custom resource,
+which declares a scaling target (such as a \textit{Deployment} or
+\textit{StatefulSet}), a polling interval, cooldown periods, and one or more
 \textit{scalers} that define the metric source (\cite{keda:scaledobjectspec}).
 When the configured metric from the scaler exceeds a threshold, KEDA adjusts
 the replica count of the target workload by updating the underlying HPA on the
@@ -100,14 +100,14 @@ context-aware scaling decisions before resource exhaustion occurs
 \label{subsec:observability}
 
 The observability stack in this thesis is deployed using the
-\texttt{kube-prometheus-stack} Helm chart, which bundles Prometheus, Grafana,
+\textit{kube-prometheus-stack} Helm chart, which bundles Prometheus, Grafana,
 and Alertmanager into a single, opinionated release (\cite{artifacthub:kube-prometheus-stack}).
 \textit{Prometheus} is an open-source monitoring system and time-series
 database that collects metrics by periodically scraping HTTP endpoints exposed
 by instrumented targets (\cite{prometheus:overview}). In the Kubernetes context,
 it discovers scrape targets automatically via Kubernetes service discovery,
-collecting cluster-level metrics from \texttt{kube-state-metrics} and
-\texttt{node-exporter}, as well as application-level metrics from the FastAPI
+collecting cluster-level metrics from \textit{kube-state-metrics} and
+\textit{node-exporter}, as well as application-level metrics from the FastAPI
 and Redis exporters. \textit{Grafana} is an open-source analytics and
 visualisation platform that queries Prometheus via its native data source
 integration and renders the collected time-series data as configurable
@@ -129,7 +129,7 @@ running instance of a chart in a cluster (\cite{helm:docs}). Helm charts enable
 repeatable, version-controlled deployments with configurable values overrides
 and built-in rollback support, significantly reducing the operational
 complexity of deploying multi-resource applications such as the
-\texttt{kube-prometheus-stack}. In this thesis, Helm is used to deploy the
+\textit{kube-prometheus-stack}. In this thesis, Helm is used to deploy the
 observability stack, and the deployment configurations are parameterised
 through values files that are committed alongside the thesis infrastructure
 code.
