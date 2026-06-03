@@ -1,36 +1,125 @@
 \newpage
 \section{Introduction}
+\label{ch:introduction}
 
-\subsection{Overview}
-Cloud computing is a revolution in application development and scalability. With the need of modern applications to be highly available and scalable, many enterprises have turned to containerized applications for highly agile and secure deployments. In order to manage these containerized applications, orchestration tools like Kubernetes have become essential. Kubernetes provides a robust platform for automating deployment, scaling, and operations of application containers across clusters of hosts.
+\subsection{Cloud Computing and the Rise of Container Orchestration}
 
-Containers are a lightweight software package that contains all the necessary components to run an application, including the code, runtime, system tools, libraries, and settings.
-\parencite{docker:containers}
-This encapsulation allows for consistent environments across development, testing, and production stages. In order to fulfill the requirements of high availability and scalability, containers are designed to be ephemeral and stateless, which means they can be easily created, destroyed, and replaced without affecting the overall application state. Thus, containers are stateless in nature and are designed to be transient and easily replaceable, should issues with the application arise.
-\parencite{containers:design-principles}
-This property introduces challenges when it comes to managing stateful applications, such as databases, within a containerized environment. Stateless applications - such as web servers and API gateways - are well-suited for containerization, as they can be easily scaled and managed without the need for persistent storage. 
+The rapid evolution of modern software systems has fundamentally transformed the way
+infrastructure is designed, deployed, and operated. At the heart of this transformation
+lies \textit{cloud computing} — a paradigm that enables on-demand access to a shared pool
+of configurable computing resources, including networks, servers, storage, applications,
+and services, that can be rapidly provisioned and released with minimal management effort
+(\cite{nist:cloudcomputing}). This model has shifted the industry away from static,
+on-premises data centres toward elastic, scalable environments that can react dynamically
+to workload demands.
 
+As organisations increasingly adopt cloud-native architectures, the notion of designing
+systems that are resilient, scalable, and operationally excellent has become central to
+engineering practice. The AWS Well-Architected Framework, for instance, codifies these
+concerns into a set of established design principles for container-based workloads,
+emphasising repeatability, automation, and observability as first-class concerns in
+modern infrastructure (\cite{aws:containerlens}).
 
-\subsection{Unterkapitel Tabelle}
-Info in Tabelle \ref{tab:beispiel}.
+A critical enabler of cloud-native architectures is the \textit{container} — a
+lightweight, self-contained unit of software that packages application code together with
+its dependencies, configuration, and runtime environment. Unlike traditional virtual
+machines, containers share the host operating system kernel and therefore incur
+significantly less overhead while still providing process-level isolation
+(\cite{docker:containersvsvms}). This characteristic makes containers especially well
+suited to microservice architectures, where large monolithic applications are decomposed
+into smaller, independently deployable services that can be scaled individually based on
+demand.
 
-% Beispiel für Tabelle
-\begin{table}[htbp!]
-    \centering
-    \begin{tabular}{|c|c|}
-        \hline
-        A & B \\ \hline
-        1 & 2 \\ \hline
-    \end{tabular}
-    \caption{Beispieltabelle}
-    \label{tab:beispiel}
-\end{table}
-\subsubsection{Unterunterkapitel Bild}
+\subsection{Kubernetes as the Standard for Container Orchestration}
 
-% Beispiel für Bilder
-\begin{figure}[htbp!]
-    \centering
-    \includegraphics[width=0.5\textwidth]{assets/images/example.jpg}
-    \caption{Dies ist eine Beispielabbildung.}
-    \label{fig:beispiel}
-\end{figure}
+Managing containerised workloads at scale introduces significant operational complexity.
+Scheduling containers across a fleet of machines, maintaining desired application state,
+performing rolling updates, and recovering from failures all require robust automation.
+It is in response to exactly these challenges that \textit{Kubernetes} — also referred
+to as K8s — emerged as the dominant container orchestration platform.
+
+Originally designed and used internally at Google as the \textit{Borg} system, Kubernetes
+was open-sourced in 2014 and donated to the Cloud Native Computing Foundation (CNCF),
+where it has since grown into the second-largest open-source project in the world
+(\cite{ibm:kuberneteshistory}). Kubernetes provides a declarative API for defining the
+desired state of an application cluster; its control plane continuously reconciles the
+observed state of the system against this desired state, automatically scheduling pods,
+managing service discovery, and orchestrating storage (\cite{kubernetes:overview}).
+
+To reduce operational complexity further, lightweight Kubernetes distributions such as
+\textit{K3s} — developed by Rancher and certified by the CNCF — have gained widespread
+adoption. K3s packages the full Kubernetes feature set into a single binary with a
+significantly reduced memory footprint, making it suitable for edge computing, IoT
+environments, and resource-constrained infrastructure (\cite{k3s:docs}). In the context
+of this thesis, K3s serves as the underlying cluster management layer for the
+experimental infrastructure under investigation.
+
+\subsection{The Challenge of Scaling Stateful Applications}
+
+While Kubernetes excels at managing stateless workloads — where any replica of a
+service can handle any request independently — scaling \textit{stateful applications}
+presents a distinct set of challenges. Stateful applications, such as in-memory databases
+and message queues, maintain persistent data or internal state that must be carefully
+managed across the lifecycle of individual pods. Kubernetes provides the
+\texttt{StatefulSet} primitive to address these requirements, offering stable network
+identities, ordered deployment and scaling, and persistent volume binding
+(\cite{kubernetes:statefulsets}).
+
+\textit{Redis} is a canonical example of such a stateful application. It is a
+high-performance, in-memory data store widely used for caching, session management, and
+real-time analytics (\cite{redis:io}). When deployed as a Redis Cluster across multiple
+nodes, it uses sharding to distribute data and replication to ensure fault tolerance.
+Scaling a Redis Cluster in a Kubernetes environment is non-trivial: adding or removing
+nodes requires coordinated resharding of data slots, careful management of cluster
+topology, and maintenance of quorum — operations that introduce significant risk if
+performed reactively under resource pressure.
+
+Recent work from the CNCF community has highlighted these concerns, noting that while
+Kubernetes operators can partially automate lifecycle management for Redis, the path
+toward robust, cloud-native stateful services remains an open challenge
+(\cite{cncf:redisoperator}).
+
+\subsection{Autoscaling Strategies: From Reactive to Predictive}
+
+Kubernetes provides native support for horizontal scaling through the
+\textit{Horizontal Pod Autoscaler} (HPA), which monitors CPU and memory utilisation
+metrics and adjusts the number of pod replicas accordingly (\cite{kubernetes:autoscaling}).
+While the HPA is effective for stateless services under gradually increasing load, its
+reactive nature introduces an inherent latency: scaling decisions are made only
+\textit{after} resource thresholds have already been breached. For latency-sensitive or
+stateful workloads, this lag can result in degraded performance, pod restarts, or
+cascading failures during traffic spikes (\cite{thoras:hpa}).
+
+An increasingly popular alternative is \textit{Kubernetes Event-Driven Autoscaling}
+(KEDA), a CNCF-graduated project that extends the standard HPA to support event- and
+metric-driven scaling from a rich ecosystem of external sources, including message
+queues, databases, and custom Prometheus metrics (\cite{keda:home}; \cite{cncf:kedagrad}).
+By decoupling scaling decisions from simple resource utilisation and enabling them to
+respond to application-level events, KEDA enables a more proactive and context-aware
+approach to scaling. This is particularly relevant for stateful workloads where
+pre-emptive resource provisioning may prevent the cluster-level disruptions that reactive
+scaling cannot avoid.
+
+\subsection{Research Objective and Thesis Structure}
+
+This thesis investigates the performance differences between two autoscaling strategies
+for stateful applications deployed in a Kubernetes cluster managed by K3s. The first
+strategy employs the native Horizontal Pod Autoscaler in a \textit{reactive} configuration,
+scaling a Redis Cluster in response to CPU and memory resource expenditure. The second
+strategy employs a \textit{custom KEDA-based operator} in a predictive, event-driven
+configuration, triggering scaling decisions based on application-level metrics sourced
+from a Prometheus observability stack.
+
+The experimental infrastructure consists of a FastAPI-based entrypoint service
+(\cite{fastapi:docs}), a Redis Cluster with a minimum of three nodes, an observability
+stack comprising Prometheus and Grafana deployed via Helm, and two scaling
+configuration manifests representing the naive HPA and KEDA-driven approaches
+respectively. All components are deployed on a K3s cluster, providing a reproducible
+and resource-constrained environment representative of real-world edge and on-premises
+deployments.
+
+The remainder of this thesis is structured as follows. Chapter ~\ref{sec:stateful-vs-stateless} details the differences between the automatic provisioning of stateless and stateful applications, a well as the issues that arise when scaling stateful workloads. Chapter~\ref{sec:technologies} provides the theoretical background on Kubernetes architecture, autoscaling mechanisms,
+stateful workloads, and the Redis Cluster model. Chapter~\ref{sec:architecture} describes the
+system design and experimental setup. Chapter~\ref{sec:results} presents the
+experimental results and performance analysis. Chapter~\ref{sec:conclusion} summarises the
+findings and discusses directions for future work.

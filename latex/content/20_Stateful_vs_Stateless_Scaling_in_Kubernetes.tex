@@ -1,0 +1,119 @@
+
+\newpage
+% ============================================================
+%  SECTION: Stateful vs. Stateless Scaling in Kubernetes
+% ============================================================
+
+\section{Scaling Stateful and Stateless Applications in Kubernetes}
+\label{sec:stateful-vs-stateless}
+
+A fundamental distinction in distributed systems design is that between
+\textit{stateless} and \textit{stateful} applications, and this distinction has
+direct consequences for how workloads are deployed, managed, and scaled inside
+a Kubernetes cluster. Understanding this divide is essential for motivating the
+core research question of this thesis.
+
+% ------------------------------------------------------------
+\subsection{Stateless Applications and Horizontal Scalability}
+\label{subsec:stateless-scaling}
+
+A stateless application does not retain any client-specific data between
+requests. Each request is self-contained and can be served by any replica of
+the application without prior knowledge of previous interactions
+(\cite{redhat:statefulvsstateless}). This architectural property makes stateless
+services trivially scalable: because every replica is functionally identical,
+the Kubernetes scheduler can start or terminate any number of them at any time
+without coordination. Kubernetes \texttt{Deployments} and
+\texttt{ReplicaSets} are the canonical workload primitives for stateless
+applications, providing identical, interchangeable pod replicas with no notion
+of stable identity or ordered lifecycle (\cite{kubernetes:statefulsets}).
+
+Horizontal scaling of a stateless service via the Horizontal Pod Autoscaler
+(HPA) is therefore straightforward: when aggregate CPU or memory utilisation
+exceeds a configured threshold, the HPA controller issues a scale-out
+instruction to the relevant \texttt{Deployment}, and the new replicas are
+scheduled and become available without any data migration, topology
+reconfiguration, or disruption to existing replicas (\cite{kubernetes:autoscaling}).
+Conversely, when load decreases, replicas can be terminated immediately since
+no in-replica state is lost. This symmetry between scale-out and scale-in is
+what makes the reactive HPA model well-suited to stateless workloads.
+
+% ------------------------------------------------------------
+\subsection{The Challenges of Scaling Stateful Applications}
+\label{subsec:stateful-challenges}
+
+Stateful applications, by contrast, maintain persistent data or internal state
+that is specific to individual instances and must survive pod restarts,
+rescheduling events, and scaling operations. This category includes relational
+databases, key-value stores, message queues, and consensus systems. Kubernetes
+provides the \texttt{StatefulSet} workload primitive to accommodate these
+requirements. Unlike a \texttt{Deployment}, a \texttt{StatefulSet} guarantees
+that each pod receives a stable, unique network identity (e.g.,
+\texttt{redis-0}, \texttt{redis-1}), a dedicated
+\texttt{PersistentVolumeClaim} that is bound across restarts, and an ordered,
+sequential lifecycle for pod creation and termination
+(\cite{kubernetes:statefulsets}, \cite{portworx:statefulsets}).
+
+These guarantees, while necessary for correctness, fundamentally complicate
+autoscaling. The following challenges are particularly relevant in the context
+of this thesis:
+
+\paragraph{Ordered deployment and termination.}
+\texttt{StatefulSet} pods are created and deleted in strict ordinal order.
+When scaling out from $n$ to $n+1$ replicas, Kubernetes will not proceed until
+the $n$-th pod is fully \textit{Ready}. This serialisation ensures application-level
+invariants (such as cluster quorum) are maintained but introduces latency that
+can be problematic under sudden load spikes (\cite{kubernetes:statefulsets}).
+A reactive autoscaler such as the HPA, which fires only after a resource
+threshold has already been breached, is therefore poorly positioned to absorb
+burst traffic for stateful workloads: by the time new replicas are ordered,
+scheduled, initialised, and joined to the cluster, the performance degradation
+may already be severe.
+
+\paragraph{Persistent volume provisioning.}
+Each new pod added to a \texttt{StatefulSet} requires a new
+\texttt{PersistentVolumeClaim} to be dynamically provisioned by the storage
+backend. Depending on the underlying storage class and infrastructure, this
+provisioning step can itself introduce non-trivial latency, further extending
+the time-to-ready for new stateful replicas compared to stateless counterparts
+(\cite{portworx:statefulsets}).
+
+\paragraph{Cluster topology and data rebalancing.}
+For distributed databases and in-memory stores that shard data across their
+nodes — such as Redis Cluster — adding or removing a node is not merely a
+matter of starting or stopping a process. Redis Cluster partitions its keyspace
+across exactly \num{16384} hash slots, each of which is assigned to a primary
+node (\cite{redis:clusterspec}). When a new node is added, the cluster operator
+must \textit{reshard} a subset of hash slots from existing nodes to the new
+one; when a node is removed, its slots must first be migrated away. This
+resharding process involves live data movement between nodes and, if performed
+reactively under resource pressure, carries a non-trivial risk of increased
+latency, partial unavailability, or data inconsistency
+(\cite{googlecloud:zerodowntime}).
+
+\paragraph{Quorum and availability constraints.}
+Many stateful distributed systems depend on a quorum of nodes being available
+to elect a leader, acknowledge writes, or service reads. Redis Cluster requires
+at least one primary per shard to be available, and Kubernetes
+\texttt{PodDisruptionBudget} (PDB) resources are the mechanism used to
+express minimum availability constraints during voluntary disruptions such as
+autoscaling events (\cite{kubernetes:disruptions}). Aggressive scale-in
+triggered by a reactive autoscaler can violate quorum constraints if PDBs are
+not carefully configured, risking full cluster unavailability.
+
+\paragraph{The HPA and stateful workloads.}
+While the HPA technically supports \texttt{StatefulSets} as scaling targets,
+its reactive, threshold-based model is widely considered inappropriate for
+database and cache workloads (\cite{hpa:bestpractices}). The HPA operates on
+\textit{lagging indicators}: it reacts to resource pressure that has already
+materialised. For a stateful application such as Redis, where high memory
+pressure can degrade cache hit rates and high CPU pressure can stall
+replication, by the time the HPA observes a breach and a new node has
+completed resharding, a significant window of degraded performance will have
+already elapsed. Furthermore, the HPA's default synchronisation period of
+15~seconds (\cite{keda:scalingdeployments}) means that multiple polling cycles
+may pass before a scaling decision is acted upon, compounding the lag.
+
+These challenges collectively motivate the investigation of a more
+\textit{proactive}, event-driven autoscaling strategy for stateful workloads,
+as explored in this thesis through the use of KEDA.

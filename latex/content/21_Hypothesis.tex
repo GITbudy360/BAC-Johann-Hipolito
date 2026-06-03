@@ -1,0 +1,91 @@
+\newpage
+\section{Hypothesis: The Operator Pattern with KEDA as a Superior Autoscaling Strategy for Stateful Workloads}
+\label{sec:hypothesis}
+
+The limitations of the reactive HPA model described in
+Section~\ref{subsec:stateful-challenges} motivate the central hypothesis of
+this thesis: that a \textit{proactive, event-driven autoscaling strategy},
+implemented through a custom Kubernetes operator in combination with KEDA, is
+a superior method of scaling stateful workloads compared to the native HPA
+baseline.
+
+\paragraph{The Operator Pattern as a Foundation for Stateful Automation.}
+The Kubernetes \textit{operator pattern} was conceived precisely to address the
+gap between the generic automation that Kubernetes provides out of the box and
+the deep, application-specific knowledge required to manage complex stateful
+systems reliably. According to the official Kubernetes documentation, the
+operator pattern \enquote{aims to capture the key aim of a human operator who
+is managing a service or set of services}, encoding that operational expertise
+into a software controller that participates in the standard Kubernetes
+reconciliation loop (\cite{kubernetes:operatorpattern}). Operators extend the
+Kubernetes API through \textit{Custom Resource Definitions} (CRDs) and an
+accompanying controller that continuously reconciles the observed state of the
+custom resource against its declared desired state.
+
+Critically, the CNCF Operator White Paper explicitly acknowledges that
+\enquote{Kubernetes primitives were not built to manage state by default} and
+that \enquote{relying on Kubernetes primitives alone brings difficulty managing
+stateful application} lifecycle (\cite{cncf:operatorwhitepaper}). The operator
+pattern is therefore not merely a convenience — it is the architecturally
+recommended approach for encoding domain-specific concerns such as data
+resharding, replication topology maintenance, and quorum-safe scaling into
+a Kubernetes-native automation layer. For a Redis Cluster deployment, a
+custom operator is capable of expressing and enforcing exactly the
+application-level invariants that a generic HPA controller cannot: for
+example, ensuring that a scale-out event is only issued once the cluster is
+fully healthy, and that the requisite resharding of hash slots is coordinated
+atomically with the scheduling of new \texttt{StatefulSet} pods.
+
+\paragraph{KEDA's Event-Driven Model as a Proactive Trigger.}
+Complementing the operator pattern, KEDA introduces an event-driven trigger
+layer that decouples scaling decisions from raw infrastructure metrics. By
+consuming application-level signals exposed via Prometheus — such as request
+rate, cache hit ratio, or queue depth — KEDA's \texttt{ScaledObject} can issue
+a scaling recommendation \textit{before} CPU or memory thresholds are breached,
+effectively shifting the scaling decision upstream in the load curve
+(\cite{keda:scalingdeployments}). This is in direct contrast to the HPA model,
+in which scaling decisions are always downstream of resource exhaustion. The
+additional configurability of KEDA's \texttt{ScaledObject} — including
+fine-grained control over polling intervals, cooldown periods, and minimum
+replica counts (\cite{kedaimpl:finegrained}) — further allows the autoscaling
+behaviour to be tuned to the specific performance characteristics of a Redis
+Cluster, where aggressive scale-in during low-traffic periods is inadvisable
+due to the cost of subsequent resharding.
+
+\paragraph{Supporting Evidence from the Literature.}
+The hypothesis is supported by a growing body of academic and industry
+research. Mondal et al.\ identified that the HPA's reliance on CPU and memory
+as lagging indicators makes it \enquote{incapable of foreseeing upcoming
+workload spikes}, leading to Quality of Service violations, long-tail latency,
+and wasted resources (\cite{arxiv:nimbusguard}). Wanigasooriya and Ekanayake
+similarly demonstrated in the NimbusGuard study that proactive autoscaling
+frameworks \enquote{translate into superior performance and cost efficiency
+compared to existing reactive methods} when evaluated alongside standard HPA
+and KEDA baselines under identical, phased load patterns (\cite{arxiv:nimbusguard}). Although that study positions KEDA itself as part of
+the reactive baseline relative to a deep-learning agent, it nevertheless
+confirms that event-driven, application-aware autoscaling consistently
+outperforms pure resource-metric scaling — a finding that directly supports
+the use of KEDA-sourced Prometheus metrics as the trigger mechanism in the
+present thesis.
+
+Furthermore, Toka et al.\ identified three structural drawbacks in the current
+Kubernetes reactive scaling process: its purely observation-based nature, its
+inability to adapt to demand variability, and the burden of manually tuning
+numerous threshold parameters (\cite{arxiv:nimbusguard}). A KEDA-based
+implementation driven by application-level Prometheus metrics partially
+addresses all three concerns: it provides an application-aware trigger rather
+than an infrastructure-level observation, it can be parameterised against
+workload-specific signals that vary with the demand pattern of the Redis
+Cluster, and it reduces manual threshold tuning by anchoring scaling decisions
+to semantically meaningful metrics.
+
+\paragraph{Scope and Expected Outcome.}
+Given this theoretical and empirical foundation, this thesis hypothesises that
+the KEDA-driven operator approach will exhibit measurably lower response
+latency under load spikes, fewer instances of cluster-level resource
+saturation, and a more stable Redis Cluster topology compared to the naive HPA
+baseline. The experimental evaluation presented in
+Chapter~\ref{sec:results} is designed to test this hypothesis directly,
+using Grafana k6 to generate controlled, reproducible traffic patterns against
+both configurations and Prometheus-backed Grafana dashboards to measure the
+resulting autoscaling behaviour and service performance.
