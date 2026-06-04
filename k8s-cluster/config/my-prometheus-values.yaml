@@ -10,13 +10,13 @@ kubeScheduler:
 # 1. Grafana Configuration
 grafana:
   service:
-    type: NodePort # Change to LoadBalancer if preferred
+    type: NodePort
 
 # 2. Prometheus Configuration
 prometheus:
   service:
-    type: NodePort # Change to LoadBalancer if preferred
+    type: NodePort
 
-  # (Keep your remote write config here for k6)
+  # Remote Write Receiver Configuration
   prometheusSpec:
     enableRemoteWriteReceiver: true

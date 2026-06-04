@@ -1,0 +1,29 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: redis-keda-scaler
+  namespace: redis
+spec:
+  # Crucial: Target the Operator's Custom Resource, NOT the StatefulSet
+  scaleTargetRef:
+    apiVersion: redis.redis.opstreelabs.in/v1beta1
+    kind: RedisCluster
+    name: redis-cluster
+  minReplicaCount: 3
+  maxReplicaCount: 6
+  advanced:
+    restoreToOriginalReplicaCount: true
+  fallback:
+    failureThreshold: 3
+    replicas: 4
+  triggers:
+    - type: prometheus
+      metadata:
+        # Update this to match your actual internal Prometheus Service URL
+        serverAddress: http://prometheus-server.monitoring.svc.cluster.local:9090
+        # Tracks the Cache Miss Ratio. Triggers scale out if misses exceed 15% of total requests.
+        query: |
+          sum(rate(redis_keyspace_misses_total{namespace="redis"}[1m])) 
+          / 
+          (sum(rate(redis_keyspace_hits_total{namespace="redis"}[1m])) + sum(rate(redis_keyspace_misses_total{namespace="redis"}[1m])))
+        threshold: "0.15"

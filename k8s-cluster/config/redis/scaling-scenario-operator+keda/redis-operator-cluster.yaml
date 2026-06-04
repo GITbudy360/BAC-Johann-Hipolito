@@ -1,0 +1,35 @@
+apiVersion: redis.redis.opstreelabs.in/v1beta1
+kind: RedisCluster
+metadata:
+  name: redis-cluster
+  namespace: redis
+spec:
+  # The operator natively handles the cluster size. 
+  # 3 means 3 Master nodes (a standard minimum for a healthy cluster geometry).
+  clusterSize: 3
+  kubernetesConfig:
+    image: 'redis:7.2-alpine'
+    imagePullPolicy: IfNotPresent
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "128Mi"
+      limits:
+        cpu: "250m"
+        memory: "256Mi"
+  redisExporter:
+    enabled: true
+    image: 'ghcr.io/oliver006/redis_exporter:latest'
+    resources:
+      requests:
+        cpu: "50m"
+        memory: "64Mi"
+  redisLeader:
+    affinity:
+      podAntiAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              app: redis-cluster
+          # Ensures no two master pods schedule on the same mini-PC node
+          topologyKey: kubernetes.io/hostname
