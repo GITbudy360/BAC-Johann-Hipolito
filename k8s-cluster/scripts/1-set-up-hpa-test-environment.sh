@@ -13,16 +13,16 @@ echo -e "${BLUE}=== Phase 1: Vanilla HPA Scenario Setup ===${NC}\n"
 # 1. Namespace & Cluster Setup
 echo -e "${YELLOW}[1/4] Creating namespace and deploying Redis StatefulSet...${NC}"
 # k create namespace redis --dry-run=client -o yaml | k apply -f -
-k apply -f ../config/redis/scaling-scenario-hpa/redis-hpa-cluster.yaml
+k3s kubectl3s kubectl apply -f ../config/redis/scaling-scenario-hpa/redis-hpa-cluster.yaml
 
 echo -e "Waiting for the 3 baseline Redis pods to initialize..."
-k wait --for=jsonpath='{.status.readyReplicas}'=3 statefulset/redis -n redis --timeout=300s
+k3s kubectl wait --for=jsonpath='{.status.readyReplicas}'=3 statefulset/redis -n redis --timeout=300s
 echo -e "${GREEN}Baseline Redis Cluster is online.${NC}\n"
 
 # 2. HPA Deployment
 echo -e "${YELLOW}[2/4] Deploying ServiceMonitor & Horizontal Pod Autoscaler (40% CPU Target)...${NC}"
-k appply -f ../config/redis/redis-servicemonitor.yaml
-k apply -f ../config/redis/scaling-scenario-hpa/redis-hpa-scaling.yaml
+k3s kubectl appply -f ../config/redis/redis-servicemonitor.yaml
+k3s kubectl apply -f ../config/redis/scaling-scenario-hpa/redis-hpa-scaling.yaml
 echo -e "${GREEN}HPA is active and monitoring.${NC}\n"
 
 # 3. The Scale-Out Phase & Ghost Pod Observation
@@ -37,10 +37,10 @@ read -p "Press [Enter] ONLY AFTER 'redis-3' is running to proceed with manual in
 echo -e "\n${YELLOW}[3/4] Executing Manual Resharding Intervention...${NC}"
 echo -e "You will now enter the interactive Redis Cluster resharding prompt."
 echo -e "You need to move ~4096 slots to the new node."
-echo -e "Running command: k exec -it redis-0 -n redis -- redis-cli --cluster reshard 127.0.0.1:6379"
+echo -e "Running command: k3s kubectl exec -it redis-0 -n redis -- redis-cli --cluster reshard 127.0.0.1:6379"
 # Dropping the set -e temporarily so a user cancelling the reshard doesn't break the script
 set +e 
-k exec -it redis-0 -n redis -- redis-cli --cluster reshard 192.168.1.101:6379
+k3s kubectl exec -it redis-0 -n redis -- redis-cli --cluster reshard 192.168.1.101:6379
 set -e
 
 # 5. The Scale-In Phase & Data Cliff Observation
