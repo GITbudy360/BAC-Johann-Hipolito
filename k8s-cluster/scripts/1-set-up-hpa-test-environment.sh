@@ -92,14 +92,55 @@ echo -e "2. Watch your Grafana dashboard. Wait for the HPA to spawn 'redis-3'."
 echo -e "3. Observe the 'Ghost Pod' phenomenon (0 CPU, 0 Hash Slots)."
 read -p "Press [Enter] ONLY AFTER 'redis-3' is running to proceed with manual intervention..."
 
-# 4. Manual Intervention
+# 4. Manual Intervention: graft the Ghost Pod into the cluster, THEN reshard onto it.
 echo -e "\n${YELLOW}[3/4] Executing Manual Resharding Intervention...${NC}"
-echo -e "You will now enter the interactive Redis Cluster resharding prompt."
-echo -e "You need to move ~4096 slots to the new node."
-echo -e "Running command: k3s kubectl exec -it redis-0 -n redis -- redis-cli --cluster reshard 127.0.0.1:6379"
-# Dropping the set -e temporarily so a user cancelling the reshard doesn't break the script
-set +e 
-k3s kubectl exec -it redis-0 -n redis -- redis-cli --cluster reshard 127.0.0.1:6379
+# Tolerant block: a missing pod or a user Ctrl-C shouldn't abort the whole script.
+set +e
+
+NEW_NODE="redis-3"   # the pod the HPA scaled out; repeat this block for redis-4/5 if more appeared
+
+# 4a. JOIN the node. The StatefulSet started redis-3, but a vanilla Redis node never
+#     issues CLUSTER MEET on its own, so it sits isolated with 0 slots and no ID the
+#     cluster recognizes - the "Ghost Pod". add-node grafts it in as a master. Without
+#     this the reshard has no valid receiving node: the prompt wants a 40-char node ID,
+#     so typing the pod name 'redis-3' is rejected ("node is not known or not a master").
+new_ip=$(k3s kubectl get pod "${NEW_NODE}" -n redis -o jsonpath='{.status.podIP}' 2>/dev/null)
+anchor_ip=$(k3s kubectl get pod redis-0 -n redis -o jsonpath='{.status.podIP}')
+
+if [[ -z "${new_ip}" ]]; then
+    echo -e "${RED}Could not find pod ${NEW_NODE}. Did the scale-out happen? Skipping intervention.${NC}"
+else
+    # Idempotent: only MEET the node if the cluster doesn't already know its IP.
+    if k3s kubectl exec redis-0 -n redis -- redis-cli cluster nodes | grep -q "${new_ip}:6379"; then
+        echo -e "${GREEN}${NEW_NODE} (${new_ip}) is already a cluster member; skipping add-node.${NC}"
+    else
+        echo -e "Joining Ghost Pod ${NEW_NODE} (${new_ip}) into the cluster as a master..."
+        k3s kubectl exec -it redis-0 -n redis -- \
+            redis-cli --cluster add-node "${new_ip}:6379" "${anchor_ip}:6379"
+    fi
+
+    # 4b. Resolve the node's real 40-char cluster ID (NOT the pod name). Note: no -t on
+    #     this exec - a TTY would append \r and corrupt the captured ID.
+    new_id=$(k3s kubectl exec redis-0 -n redis -- redis-cli cluster nodes \
+        | grep "${new_ip}:6379" | awk '{print $1}')
+
+    if [[ -z "${new_id}" ]]; then
+        echo -e "${RED}Could not resolve ${NEW_NODE}'s node ID after add-node. Skipping reshard.${NC}"
+    else
+        # Move ~4096 slots (16384 / 4 masters) onto the new node, taken evenly from all
+        # existing masters. Non-interactive (--cluster-yes) so there are no prompts.
+        echo -e "Receiving node: ${NEW_NODE} -> ID ${YELLOW}${new_id}${NC}"
+        echo -e "Resharding 4096 slots from all masters onto ${NEW_NODE}..."
+        k3s kubectl exec -it redis-0 -n redis -- redis-cli --cluster reshard 127.0.0.1:6379 \
+            --cluster-from all \
+            --cluster-to "${new_id}" \
+            --cluster-slots 4096 \
+            --cluster-yes
+        echo -e "${GREEN}Reshard complete. Verify with:${NC}"
+        echo -e "   k3s kubectl exec -it redis-0 -n redis -- redis-cli --cluster check 127.0.0.1:6379"
+    fi
+fi
+
 set -e
 
 # 5. The Scale-In Phase & Data Cliff Observation

@@ -20,7 +20,45 @@ export const options = {
   },
 };
 
-const API_URL = __ENV.API_URL || 'http://localhost:8000';
+// --- Target resolution: spread ingress across ALL node IPs ----------------
+// Hammering a single NodePort IP saturates that one node's conntrack table /
+// SYN backlog under load, which surfaces on the client as `connectex` /
+// "connection timed out". Spreading requests across every node removes that
+// single-node bottleneck - and keeps the thesis measuring Redis scaling rather
+// than ingress saturation on one box.
+//
+// Precedence:
+//   API_HOSTS="ip1,ip2,..." (+ API_PORT, default 30080) -> round-robin these
+//   API_URL="http://host:port"                          -> single host (legacy)
+//   neither                                             -> all 6 cluster nodes
+const API_PORT = __ENV.API_PORT || '30080';
+const DEFAULT_HOSTS = [
+  '192.168.1.101', '192.168.1.102', '192.168.1.103',
+  '192.168.1.104', '192.168.1.105', '192.168.1.106',
+];
+
+function resolveBases() {
+  if (__ENV.API_HOSTS) {
+    return __ENV.API_HOSTS.split(',')
+      .map((h) => h.trim())
+      .filter(Boolean)
+      .map((h) => (h.includes('://') ? h : `http://${h}:${API_PORT}`));
+  }
+  if (__ENV.API_URL) {
+    return [__ENV.API_URL.trim()];
+  }
+  return DEFAULT_HOSTS.map((h) => `http://${h}:${API_PORT}`);
+}
+
+// Resolve once at init and strip any trailing slash so `${base}/score/` never
+// becomes `//score/`.
+const BASES = resolveBases().map((b) => b.replace(/\/+$/, ''));
+
+// Pick a node per request. Random spread balances connections across nodes
+// without VUs needing to share a counter.
+function apiBase() {
+  return BASES[Math.floor(Math.random() * BASES.length)];
+}
 
 // --- Workload shape -------------------------------------------------------
 // Keys are spread across many sorted sets so adding/resharding Redis nodes can
@@ -75,6 +113,7 @@ function coldBoard() {
 }
 
 export default function () {
+  const base = apiBase();
   const isWrite = Math.random() < 0.8;
 
   if (isWrite) {
@@ -88,7 +127,7 @@ export default function () {
       headers: { 'Content-Type': 'application/json' },
     };
 
-    const res = http.post(`${API_URL}/score/`, payload, params);
+    const res = http.post(`${base}/score/`, payload, params);
 
     check(res, {
       'score update status is 200': (r) => r.status === 200,
@@ -97,7 +136,7 @@ export default function () {
     // Most reads hit warm boards; a fraction intentionally miss to exercise the
     // KEDA cache-miss-ratio trigger.
     const board = Math.random() < COLD_READ_FRACTION ? coldBoard() : warmBoard();
-    const res = http.get(`${API_URL}/leaderboard/?board=${encodeURIComponent(board)}`);
+    const res = http.get(`${base}/leaderboard/?board=${encodeURIComponent(board)}`);
 
     check(res, {
       'leaderboard fetch status is 200': (r) => r.status === 200,

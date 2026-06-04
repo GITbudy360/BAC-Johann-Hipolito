@@ -17,7 +17,7 @@ spec:
         container: redis # Targets only the main application
         target:
           type: Utilization
-          averageUtilization: 40
+          averageUtilization: 70
   behavior:
       scaleDown:
         # Forces the HPA to wait 5 minutes after CPU drops before terminating a pod
