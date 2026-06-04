@@ -65,23 +65,34 @@ async def _connect() -> RedisCluster:
     raise RuntimeError(f"Could not connect to any Redis startup node: {last_err}")
 
 
+async def _connect_with_retry() -> None:
+    """Background task that keeps retrying until Redis is reachable.
+
+    Runs OUTSIDE the blocking part of startup so uvicorn binds port 8000
+    immediately and /healthy responds even while Redis is still coming up.
+    """
+    global r
+    delay = 2.0
+    while True:
+        try:
+            r = await _connect()
+            return
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Redis connect failed, retrying in %.1fs: %s", delay, e)
+            await asyncio.sleep(delay)
+            delay = min(delay * 1.5, 15.0)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global r
-    # Retry loop so the pod waits for whichever cluster is currently being brought up.
-    delay = 2.0
-    for attempt in range(1, 31):
-        try:
-            r = await _connect()
-            break
-        except Exception as e:  # noqa: BLE001
-            logger.warning("Redis connect attempt %d failed: %s", attempt, e)
-            await asyncio.sleep(delay)
-            delay = min(delay * 1.5, 15.0)
-    else:
-        raise RuntimeError("Redis unavailable after retries")
+    # Connect to Redis in the BACKGROUND. Blocking here previously stopped uvicorn
+    # from binding port 8000 while Redis was unreachable, so the liveness probe got
+    # "connection refused" and kept killing the pod (Exit 137).
+    connect_task = asyncio.create_task(_connect_with_retry())
     yield
     # Clean up on shutdown
+    connect_task.cancel()
     if r is not None:
         await r.aclose()
 
@@ -97,6 +108,8 @@ class ScoreUpdate(BaseModel):
 
 @app.post("/score/")
 async def update_score(data: ScoreUpdate):
+    if r is None:
+        raise HTTPException(status_code=503, detail="redis not connected yet")
     try:
         # ZADD adds or updates a member's score in a sorted set (perfect for leaderboards).
         # `board` is high-cardinality so writes distribute across many slots/nodes.
@@ -108,6 +121,8 @@ async def update_score(data: ScoreUpdate):
 
 @app.get("/leaderboard/")
 async def get_leaderboard(board: str = Query(...), top: int = 10):
+    if r is None:
+        raise HTTPException(status_code=503, detail="redis not connected yet")
     try:
         # ZREVRANGE gets the top players by score descending.
         leaders = await r.zrevrange(board, 0, top - 1, withscores=True)
