@@ -10,9 +10,9 @@ echo -e "${RED}=== Phase 2: Aggressive HPA Teardown ===${NC}\n"
 
 # 1. Delete HPA and Cluster Resources using the provided manifests
 echo -e "${YELLOW}[1/3] Deleting Autoscaler, StatefulSet, Services, and ConfigMaps...${NC}"
-k delete -f ../config/redis/redis-hpa-scaling.yaml --ignore-not-found=true
-k delete -f redis-servicemonitor.yaml --ignore-not-found=true
-k delete -f ../config/redis/redis-hpa-cluster.yaml --ignore-not-found=true
+k delete -f ../config/redis/scaling-scenario-hpa/redis-hpa-scaling.yaml --ignore-not-found=true
+k delete -f ../config/redis/redis-servicemonitor.yaml --ignore-not-found=true
+k delete -f ../config/redis/scaling-scenario-hpa/redis-hpa-cluster.yaml --ignore-not-found=true
 
 # Wait for the pods to actually terminate before deleting PVCs
 echo -e "Waiting for Redis pods to terminate completely..."
