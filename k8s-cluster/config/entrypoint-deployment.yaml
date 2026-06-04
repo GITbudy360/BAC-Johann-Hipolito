@@ -5,7 +5,9 @@ metadata:
   labels:
     app: entrypoint
 spec:
-  replicas: 3 # Start with 3 replicas distributed across your cluster nodes
+  # Scaled to 6 to map perfectly to your 6-node physical topology. 
+  # This ensures no single node handles all the ingress traffic.
+  replicas: 6 
   selector:
     matchLabels:
       app: entrypoint
@@ -16,22 +18,27 @@ spec:
     spec:
       containers:
       - name: fastapi
-        image: dockbudy360/fastapi-entrypoint:v2 # Replace with your actual image
+        image: dockbudy360/fastapi-entrypoint:v2.2
         ports:
         - containerPort: 8000
         env:
         - name: REDIS_HOST
-          # Update this to match the exact Service name created by your Redis Operator
           value: "redis-cluster-service" 
         - name: REDIS_PORT
           value: "6379"
+        # If your base image uses Uvicorn, this environment variable 
+        # automatically tells it to spin up multiple worker processes.
+        - name: WEB_CONCURRENCY
+          value: "4" 
         resources:
           requests:
-            cpu: "100m"
-            memory: "128Mi"
-          limits:
-            cpu: "250m"
+            cpu: "500m" # Request half a core
             memory: "256Mi"
+          limits:
+            # Increased to a full 2 cores. 
+            # This gives Python the raw power it needs to route heavy traffic.
+            cpu: "2" 
+            memory: "512Mi"
 ---
 apiVersion: v1
 kind: Service
@@ -45,4 +52,4 @@ spec:
     - protocol: TCP
       port: 80
       targetPort: 8000
-      nodePort: 30080 # Exposes the service on port 30080 on all cluster nodes
+      nodePort: 30080

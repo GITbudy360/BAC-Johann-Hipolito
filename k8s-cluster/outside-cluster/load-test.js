@@ -1,22 +1,28 @@
 import http from 'k6/http';
-import { check, sleep } from 'k6';
+import { check } from 'k6';
 import { randomString, randomIntBetween } from 'https://jslib.k6.io/k6-utils/1.2.0/index.js';
 
-// Configuration for the load test phases
+// Configuration using the Ramping Arrival Rate executor
 export const options = {
-  stages: [
-    { duration: '30s', target: 50 },  // Ramp up to 50 virtual users
-    { duration: '2m', target: 200 },  // Hold at 200 users to test scaling
-    { duration: '30s', target: 0 },   // Ramp down
-  ],
+  scenarios: {
+    redis_hpa_trigger: {
+      executor: 'ramping-arrival-rate',
+      startRate: 50,
+      timeUnit: '1s', // 50 requests per second
+      preAllocatedVUs: 50, // Allocate fewer VUs to save Windows VM resources
+      maxVUs: 300, // Maximum VUs k6 can scale to if requests get queued
+      stages: [
+        { duration: '30s', target: 1000 }, 
+        { duration: '2m', target: 1000 },
+        { duration: '30s', target: 0 },   // Ramp down
+      ],
+    },
+  },
 };
 
-// Pass the Entrypoint API URL as an environment variable
-// Example: k6 run -e API_URL=http://<ENTRYPOINT_NODEPORT_IP> test.js
 const API_URL = __ENV.API_URL || 'http://localhost:8000';
 
 export default function () {
-  // Simulate an 80/20 split between writes (submitting scores) and reads (viewing leaderboard)
   const isWrite = Math.random() < 0.8;
 
   if (isWrite) {
@@ -41,7 +47,4 @@ export default function () {
       'leaderboard fetch status is 200': (r) => r.status === 200,
     });
   }
-
-  // Brief pause to simulate human interaction time
-  sleep(0.1);
 }

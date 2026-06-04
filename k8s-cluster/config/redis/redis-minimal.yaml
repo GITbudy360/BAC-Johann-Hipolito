@@ -22,6 +22,8 @@ spec:
       name: redis
     - port: 16379
       name: gossip
+    - port: 9121
+      name: metrics
   selector:
     app: redis
 ---
@@ -53,6 +55,19 @@ spec:
           volumeMounts:
             - name: conf
               mountPath: /etc/redis
+        - name: redis-exporter
+          image: ghcr.io/oliver006/redis_exporter:latest
+          ports:
+          - containerPort: 9121
+            name: metrics
+          env:
+          # Since it's a sidecar, it can reach the main Redis container via localhost
+          - name: REDIS_ADDR
+            value: "redis://localhost:6379"
+          resources: 
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
       volumes:
         - name: conf
           configMap:
