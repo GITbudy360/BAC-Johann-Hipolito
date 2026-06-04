@@ -1,0 +1,16 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: redis-monitor
+  namespace: redis
+  labels:
+    # CRITICAL: This label must match what your Prometheus Operator is looking for.
+    # 'release: prometheus' is the default for the kube-prometheus-stack helm chart.
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app: redis # Matches the labels on your redis-headless service
+  endpoints:
+  - port: metrics # Matches the named port 9121 in your service
+    interval: 15s

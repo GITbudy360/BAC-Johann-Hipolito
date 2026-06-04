@@ -18,12 +18,12 @@ spec:
     spec:
       containers:
       - name: fastapi
-        image: dockbudy360/fastapi-entrypoint:v2.2
+        image: dockbudy360/fastapi-entrypoint:2.3
         ports:
         - containerPort: 8000
         env:
         - name: REDIS_HOST
-          value: "redis-cluster-service" 
+          value: "redis-headless.redis.svc.cluster.local" # Kubernetes DNS for the Redis service
         - name: REDIS_PORT
           value: "6379"
         # If your base image uses Uvicorn, this environment variable 
