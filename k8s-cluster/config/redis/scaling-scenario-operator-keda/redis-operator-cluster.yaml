@@ -20,6 +20,12 @@ spec:
   redisExporter:
     enabled: true
     image: 'ghcr.io/oliver006/redis_exporter:latest'
+    serviceMonitor:
+      enabled: true
+      interval: 15s
+      # This critical label tells the kube-prometheus-stack to pick it up
+      labels:
+        release: prometheus
     resources:
       requests:
         cpu: "50m"
