@@ -23,7 +23,7 @@ k3s kubectl delete -f ../config/redis/scaling-scenario-operator-keda/redis-keda-
 k3s kubectl delete -f ../config/redis/scaling-scenario-operator-keda/redis-operator-cluster.yaml --ignore-not-found=true
 # Delete the HPA scenario manifests.
 k3s kubectl delete -f ../config/redis/scaling-scenario-hpa/redis-hpa-scaling.yaml --ignore-not-found=true
-k3s kubectl delete -f ../config/redis/redis-servicemonitor.yaml --ignore-not-found=true
+k3s kubectl delete -f ../config/redis/scaling-scenario-hpa/redis-servicemonitor.yaml --ignore-not-found=true
 k3s kubectl delete -f ../config/redis/scaling-scenario-hpa/redis-hpa-cluster.yaml --ignore-not-found=true
 # Purge any leftover persistent data.
 k3s kubectl delete pvc --all -n redis --ignore-not-found=true
@@ -44,7 +44,7 @@ echo -e "${GREEN}Baseline Redis Cluster is online.${NC}\n"
 
 # 2. HPA Deployment
 echo -e "${YELLOW}[2/4] Deploying ServiceMonitor & Horizontal Pod Autoscaler (40% CPU Target)...${NC}"
-k3s kubectl apply -f ../config/redis/redis-servicemonitor.yaml
+k3s kubectl apply -f ../config/redis/scaling-scenario-hpa/redis-servicemonitor.yaml
 k3s kubectl apply -f ../config/redis/scaling-scenario-hpa/redis-hpa-scaling.yaml
 echo -e "${GREEN}HPA is active and monitoring.${NC}\n"
 
