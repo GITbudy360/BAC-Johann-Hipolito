@@ -40,6 +40,14 @@ k3s kubectl apply -f ../config/redis/scaling-scenario-hpa/redis-hpa-cluster.yaml
 
 echo -e "Waiting for the 3 baseline Redis pods to initialize..."
 k3s kubectl wait --for=jsonpath='{.status.readyReplicas}'=3 statefulset/redis -n redis --timeout=300s
+
+# Form the cluster (3 masters splitting all 16384 slots) using the pods' IPs.
+echo -e "Forming the Redis Cluster..."
+ip0=$(k3s kubectl get pod redis-0 -n redis -o jsonpath='{.status.podIP}')
+ip1=$(k3s kubectl get pod redis-1 -n redis -o jsonpath='{.status.podIP}')
+ip2=$(k3s kubectl get pod redis-2 -n redis -o jsonpath='{.status.podIP}')
+k3s kubectl exec -it redis-0 -n redis -- redis-cli --cluster create "${ip0}:6379" "${ip1}:6379" "${ip2}:6379" --cluster-yes
+
 echo -e "${GREEN}Baseline Redis Cluster is online.${NC}\n"
 
 # 2. HPA Deployment

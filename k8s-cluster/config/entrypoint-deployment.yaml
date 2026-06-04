@@ -18,18 +18,32 @@ spec:
     spec:
       containers:
       - name: fastapi
-        image: dockbudy360/fastapi-entrypoint:2.3
+        image: dockbudy360/fastapi-entrypoint:2.4
         ports:
         - containerPort: 8000
         env:
-        - name: REDIS_HOST
-          value: "redis-headless.redis.svc.cluster.local" # Kubernetes DNS for the Redis service
-        - name: REDIS_PORT
-          value: "6379"
-        # If your base image uses Uvicorn, this environment variable 
+        # Candidate startup nodes for BOTH scaling scenarios in the `redis` namespace.
+        # The app connects to whichever service currently exists:
+        #   - redis-headless        -> HPA StatefulSet (redis-hpa-cluster.yaml)
+        #   - redis-cluster-leader  -> Opstree RedisCluster (redis-operator-cluster.yaml)
+        - name: REDIS_STARTUP_NODES
+          value: "redis-headless.redis.svc.cluster.local:6379,redis-cluster-leader.redis.svc.cluster.local:6379"
+        # If your base image uses Uvicorn, this environment variable
         # automatically tells it to spin up multiple worker processes.
         - name: WEB_CONCURRENCY
-          value: "4" 
+          value: "4"
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8000
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /healthy
+            port: 8000
+          initialDelaySeconds: 10
+          periodSeconds: 15
         resources:
           requests:
             cpu: "500m" # Request half a core

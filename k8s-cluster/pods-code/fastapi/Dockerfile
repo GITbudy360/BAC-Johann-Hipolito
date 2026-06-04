@@ -29,5 +29,7 @@ USER appuser
 # Document the port the container will listen on
 EXPOSE 8000
 
-# Start the application
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Start the application.
+# Shell form so ${WEB_CONCURRENCY} expands; `exec` replaces the shell so uvicorn
+# becomes PID 1 and receives SIGTERM for graceful shutdown. Defaults to 4 workers.
+CMD ["sh", "-c", "exec uvicorn main:app --host 0.0.0.0 --port 8000 --workers ${WEB_CONCURRENCY:-4}"]
