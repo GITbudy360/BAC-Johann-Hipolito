@@ -1,17 +1,26 @@
-import os
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from redis.asyncio.cluster import RedisCluster 
+from redis.asyncio.cluster import RedisCluster
+import os
 
-app = FastAPI(title="Leaderboard Entrypoint")
+# Global placeholder
+r = None
 
-# Connect to the Headless Service you created earlier
-REDIS_HOST = os.getenv("REDIS_HOST", "redis-headless.redis.svc.cluster.local") 
-REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global r
+    REDIS_HOST = os.getenv("REDIS_HOST", "redis-headless.redis.svc.cluster.local")
+    REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
+    
+    # Initialize inside the active event loop
+    r = RedisCluster(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+    yield
+    # Clean up on shutdown
+    await r.aclose()
 
-# Initialize the async Redis Cluster client.
-# It automatically handles connection pooling and discovers other nodes via the headless service.
-r = RedisCluster(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+app = FastAPI(title="Leaderboard Entrypoint", lifespan=lifespan)
+
 
 class ScoreUpdate(BaseModel):
     player_id: str
