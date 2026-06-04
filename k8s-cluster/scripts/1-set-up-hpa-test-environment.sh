@@ -13,7 +13,7 @@ echo -e "${BLUE}=== Phase 1: Vanilla HPA Scenario Setup ===${NC}\n"
 # 1. Namespace & Cluster Setup
 echo -e "${YELLOW}[1/4] Creating namespace and deploying Redis StatefulSet...${NC}"
 # k create namespace redis --dry-run=client -o yaml | k apply -f -
-k3s kubectl3s kubectl apply -f ../config/redis/scaling-scenario-hpa/redis-hpa-cluster.yaml
+k3s kubectl apply -f ../config/redis/scaling-scenario-hpa/redis-hpa-cluster.yaml
 
 echo -e "Waiting for the 3 baseline Redis pods to initialize..."
 k3s kubectl wait --for=jsonpath='{.status.readyReplicas}'=3 statefulset/redis -n redis --timeout=300s
