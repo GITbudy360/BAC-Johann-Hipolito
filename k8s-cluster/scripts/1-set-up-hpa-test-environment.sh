@@ -30,6 +30,17 @@ k3s kubectl delete pvc --all -n redis --ignore-not-found=true
 # Finally drop the namespace itself (cascades anything remaining) and wait for full termination.
 k3s kubectl delete namespace redis --ignore-not-found=true
 k3s kubectl wait --for=delete namespace/redis --timeout=120s
+
+# Clear any FastAPI entrypoint pods left over from a previous run. main.py's
+# _connect_with_retry connects only until its FIRST success and never re-resolves
+# topology, so a surviving pod stays pinned to the cluster we just scorched. Scale
+# to 0 here and bring it back up (in step 1) so every pod boots fresh against the
+# NEW cluster. Guarded so a first run (no deployment yet) just skips this.
+if k3s kubectl get deployment fastapi-entrypoint -n default >/dev/null 2>&1; then
+    echo -e "${YELLOW}Clearing stale FastAPI entrypoint pods...${NC}"
+    k3s kubectl scale deployment fastapi-entrypoint -n default --replicas=0
+    k3s kubectl wait --for=delete pod -l app=entrypoint -n default --timeout=120s
+fi
 set -e
 echo -e "${GREEN}Clean slate confirmed.${NC}\n"
 
@@ -37,6 +48,15 @@ echo -e "${GREEN}Clean slate confirmed.${NC}\n"
 echo -e "${YELLOW}[1/4] Creating namespace and deploying Redis StatefulSet...${NC}"
 k3s kubectl create namespace redis --dry-run=client -o yaml | k3s kubectl apply -f -
 k3s kubectl apply -f ../config/redis/scaling-scenario-hpa/redis-hpa-cluster.yaml
+
+# Spin the FastAPI entrypoint back up NOW - BEFORE the cluster is formed below - so
+# its boot overlaps with Redis coming online. Each pod's _connect_with_retry loop
+# keeps retrying (with backoff) against the not-yet-formed cluster and latches on
+# the instant the cluster is created, leaving the entrypoint warm and connected by
+# the time the test starts. apply also (re)creates the NodePort Service and resets
+# the deployment to its full 6 replicas, so this works on a first run too.
+echo -e "${YELLOW}Spinning the FastAPI entrypoint back up (parallel with Redis init)...${NC}"
+k3s kubectl apply -f ../config/entrypoint-deployment.yaml
 
 echo -e "Waiting for the 3 baseline Redis pods to initialize..."
 k3s kubectl wait --for=jsonpath='{.status.readyReplicas}'=3 statefulset/redis -n redis --timeout=300s
@@ -49,6 +69,14 @@ ip2=$(k3s kubectl get pod redis-2 -n redis -o jsonpath='{.status.podIP}')
 k3s kubectl exec -it redis-0 -n redis -- redis-cli --cluster create "${ip0}:6379" "${ip1}:6379" "${ip2}:6379" --cluster-yes
 
 echo -e "${GREEN}Baseline Redis Cluster is online.${NC}\n"
+
+# Slots are now assigned, so wait for the entrypoint to finish connecting - its
+# /ready probe flips to 200 only after the Redis client is live. This keeps us
+# from handing the user a "start the test" prompt while the entrypoint is still
+# unconnected. Tolerant (|| true) so one slow pod never blocks the thesis flow.
+echo -e "Waiting for the FastAPI entrypoint to connect to the new cluster..."
+k3s kubectl rollout status deployment/fastapi-entrypoint -n default --timeout=120s || true
+echo -e "${GREEN}FastAPI entrypoint is connected and ready.${NC}\n"
 
 # 2. HPA Deployment
 echo -e "${YELLOW}[2/4] Deploying ServiceMonitor & Horizontal Pod Autoscaler (40% CPU Target)...${NC}"
