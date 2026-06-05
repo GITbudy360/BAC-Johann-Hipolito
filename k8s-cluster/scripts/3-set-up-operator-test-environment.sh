@@ -120,8 +120,14 @@ echo -e "${GREEN}Operator-managed Redis Cluster is online.${NC}\n"
 # "cluster actually formed and reachable" barrier. Tolerant so one slow pod
 # never blocks the flow.
 echo -e "Waiting for the FastAPI entrypoint to connect to the cluster..."
-k3s kubectl rollout status deployment/fastapi-entrypoint -n default --timeout=120s || true
-echo -e "${GREEN}FastAPI entrypoint is connected and ready.${NC}\n"
+# Report the REAL result. The if-condition keeps set -e from aborting on a timeout,
+# but we no longer claim success when the rollout actually failed.
+if k3s kubectl rollout status deployment/fastapi-entrypoint -n default --timeout=120s; then
+    echo -e "${GREEN}FastAPI entrypoint is connected and ready.${NC}\n"
+else
+    echo -e "${RED}WARNING: entrypoint did not become Ready - it likely can't reach Redis.${NC}"
+    echo -e "${RED}Inspect: k3s kubectl logs -n default -l app=entrypoint --tail=20${NC}\n"
+fi
 
 # 3. Deploy the KEDA autoscaler.
 echo -e "${YELLOW}[3/4] Deploying the KEDA ScaledObject (cache-miss-ratio trigger > 15%)...${NC}"

@@ -16,12 +16,12 @@ redisCluster:
   # the comparison. Flip to true to bring the operator's persistence into scope.
   persistenceEnabled: false
 
-  # Use the SAME Redis build as the HPA scenario (redis:7.2-alpine) rather than the
-  # chart default (quay.io/opstree/redis:v7.0.15), so the scenarios differ only in the
-  # scaling method, not the Redis version. (Keys confirmed against the chart values.)
-  image: redis
-  tag: "7.2-alpine"
-  imagePullPolicy: IfNotPresent
+  # IMPORTANT: do NOT override this with the vanilla redis image. The Opstree operator
+  # depends on its OWN image's entrypoint (quay.io/opstree/redis) to enable cluster mode
+  # (cluster-enabled yes). A plain redis:7.2-alpine boots in STANDALONE mode, so redis-py
+  # fails with "Cluster mode is not enabled on this node" and the entrypoint never connects.
+  # We therefore use the chart's default Opstree image; the minor version delta vs the HPA
+  # scenario's redis:7.2 is an acceptable, documented trade-off for a working cluster.
   resources:
     requests:
       cpu: "100m"
