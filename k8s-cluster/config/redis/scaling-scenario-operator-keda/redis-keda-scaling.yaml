@@ -19,17 +19,19 @@ spec:
   triggers:
     - type: prometheus
       # Value (not the KEDA default AverageValue): with AverageValue the threshold is
-      # interpreted PER REPLICA, so a cache-miss RATIO of ~0.25 vs threshold 0.15 would
-      # compute desired=ceil(0.25/0.15)=2 and never scale past minReplicaCount. With
-      # Value, desired=ceil(currentReplicas * ratio/threshold), so it fires when the
-      # ratio exceeds the threshold as intended.
+      # interpreted PER REPLICA, so the measured ~0.10 ratio vs a 0.05 threshold would give
+      # desired=ceil(0.10/0.05)=2 and never scale past minReplicaCount. With Value,
+      # desired=ceil(currentReplicas * ratio/threshold), so it fires (and climbs toward
+      # maxReplicaCount) whenever the ratio exceeds the threshold.
       metricType: Value
       metadata:
         # Update this to match your actual internal Prometheus Service URL
         serverAddress: http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
-        # Tracks the Cache Miss Ratio. Triggers scale out if misses exceed 15% of total requests.
+        # Cache-miss ratio. The realized ratio under load is ~0.10 (writes populate the warm
+        # boards, so most warm reads hit), so the original 0.15 never fired. 0.05 sits safely
+        # below the measured ~0.10, so scale-out actually triggers.
         query: |
-          sum(rate(redis_keyspace_misses_total{namespace="redis"}[1m])) 
-          / 
+          sum(rate(redis_keyspace_misses_total{namespace="redis"}[1m]))
+          /
           (sum(rate(redis_keyspace_hits_total{namespace="redis"}[1m])) + sum(rate(redis_keyspace_misses_total{namespace="redis"}[1m])))
-        threshold: "0.15"
+        threshold: "0.05"
