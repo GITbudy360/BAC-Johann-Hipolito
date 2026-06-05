@@ -198,12 +198,29 @@ set +e
 
 echo -e "${YELLOW}Pinning to 4 (operator adds leader-3 and RESHARDS slots onto it)...${NC}"
 k3s kubectl annotate scaledobject redis-keda-scaler -n redis autoscaling.keda.sh/paused-replicas="4" --overwrite
-for _ in $(seq 1 90); do
+for _ in $(seq 1 150); do
     k3s kubectl get pod redis-cluster-leader-3 -n redis >/dev/null 2>&1 && break
     sleep 2
 done
-k3s kubectl rollout status statefulset redis-cluster-leader -n redis --timeout=300s
-sleep 15  # let the operator finish migrating slots onto leader-3 before we measure
+k3s kubectl rollout status statefulset redis-cluster-leader -n redis --timeout=600s
+
+# Wait for the scale-out reshard to FULLY settle before scaling in. The operator moves a
+# quarter of the slots onto leader-3; if we scale in mid-migration we leave an OPEN slot the
+# operator CANNOT self-heal - it loops forever on "Please fix your cluster problems". Gate on:
+# all 16384 slots covered AND none left open. Generous window: resharding is slow on small nodes.
+echo -e "Waiting for the scale-out reshard to settle (all slots covered, none open)..."
+settled=0
+for _ in $(seq 1 120); do   # up to ~10 min
+    chk=$(k3s kubectl exec redis-cluster-leader-0 -n redis -- redis-cli --cluster check 127.0.0.1:6379 2>/dev/null)
+    if echo "$chk" | grep -q "All 16384 slots covered" && ! echo "$chk" | grep -q "are open"; then
+        settled=1; break
+    fi
+    sleep 5
+done
+if [[ "$settled" -ne 1 ]]; then
+    echo -e "${RED}Scale-out reshard did not settle (open slots remain). Scaling in now risks a stuck${NC}"
+    echo -e "${RED}cluster - fix first:  k3s kubectl exec -it redis-cluster-leader-0 -n redis -- redis-cli --cluster fix 127.0.0.1:6379${NC}"
+fi
 
 echo -e "\n${BLUE}--- BEFORE scale-in: 4 masters, all 16384 slots covered ---${NC}"
 k3s kubectl exec redis-cluster-leader-0 -n redis -- redis-cli cluster info | grep -E 'cluster_state|cluster_slots_assigned|cluster_slots_ok'
@@ -211,7 +228,7 @@ k3s kubectl exec redis-cluster-leader-0 -n redis -- redis-cli cluster info | gre
 read -p "Press [Enter] to scale IN to 3 and watch the operator DRAIN leader-3 first..."
 echo -e "${YELLOW}Pinning to 3 (operator migrates leader-3's slots to survivors, THEN removes it)...${NC}"
 k3s kubectl annotate scaledobject redis-keda-scaler -n redis autoscaling.keda.sh/paused-replicas="3" --overwrite
-k3s kubectl wait --for=delete pod/redis-cluster-leader-3 -n redis --timeout=300s
+k3s kubectl wait --for=delete pod/redis-cluster-leader-3 -n redis --timeout=600s
 
 echo -e "\n${GREEN}--- AFTER scale-in: still 16384 slots, no data loss (no cliff) ---${NC}"
 k3s kubectl exec redis-cluster-leader-0 -n redis -- redis-cli cluster info | grep -E 'cluster_state|cluster_slots_assigned|cluster_slots_ok'
