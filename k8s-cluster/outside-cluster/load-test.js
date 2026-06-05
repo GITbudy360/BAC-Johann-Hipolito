@@ -79,7 +79,7 @@ const REGION_TOTAL = REGIONS.reduce((sum, r) => sum + r.weight, 0);
 const MODES = ['ranked', 'ranked', 'ranked', 'casual', 'blitz'];
 
 const WINDOW_DAYS = 7;          // boards for the last 7 days exist (warm)
-const COLD_READ_FRACTION = 0.1; // 10% of reads hit nonexistent boards -> keyspace misses (drives KEDA)
+const COLD_READ_FRACTION = 0.25; // 25% of reads hit nonexistent boards -> keyspace misses (drives KEDA)
 
 function weightedRegion() {
   let pick = Math.random() * REGION_TOTAL;

@@ -20,7 +20,7 @@ spec:
     - type: prometheus
       metadata:
         # Update this to match your actual internal Prometheus Service URL
-        serverAddress: http://prometheus-server.monitoring.svc.cluster.local:9090
+        serverAddress: http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
         # Tracks the Cache Miss Ratio. Triggers scale out if misses exceed 15% of total requests.
         query: |
           sum(rate(redis_keyspace_misses_total{namespace="redis"}[1m])) 

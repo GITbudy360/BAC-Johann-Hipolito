@@ -11,10 +11,10 @@ NC='\033[0m' # No Color
 # Resolve paths relative to this script so it works no matter where it's invoked from
 cd "$(dirname "$0")"
 
-echo -e "${BLUE}=== Phase 1: Vanilla HPA Scenario Setup ===${NC}\n"
+echo -e "${BLUE}=== Phase 1: Vanilla HPA Scenario - Scale-Out / Ghost Pod Experiment ===${NC}\n"
 
 # 0. Scorch any prior state so this run starts from a guaranteed clean slate
-echo -e "${YELLOW}[0/4] Scorching prior Redis state (manifests, PVCs, namespace)...${NC}"
+echo -e "${YELLOW}[0/3] Scorching prior Redis state (manifests, PVCs, namespace)...${NC}"
 # Drop set -e: most of these resources won't exist on a fresh cluster, and that's fine.
 set +e
 # Delete the Operator/KEDA custom resources first, while their controllers are alive,
@@ -45,7 +45,7 @@ set -e
 echo -e "${GREEN}Clean slate confirmed.${NC}\n"
 
 # 1. Namespace & Cluster Setup
-echo -e "${YELLOW}[1/4] Creating namespace and deploying Redis StatefulSet...${NC}"
+echo -e "${YELLOW}[1/3] Creating namespace and deploying Redis StatefulSet...${NC}"
 k3s kubectl create namespace redis --dry-run=client -o yaml | k3s kubectl apply -f -
 k3s kubectl apply -f ../config/redis/scaling-scenario-hpa/redis-hpa-cluster.yaml
 
@@ -79,75 +79,51 @@ k3s kubectl rollout status deployment/fastapi-entrypoint -n default --timeout=12
 echo -e "${GREEN}FastAPI entrypoint is connected and ready.${NC}\n"
 
 # 2. HPA Deployment
-echo -e "${YELLOW}[2/4] Deploying ServiceMonitor & Horizontal Pod Autoscaler (40% CPU Target)...${NC}"
+echo -e "${YELLOW}[2/3] Deploying ServiceMonitor & Horizontal Pod Autoscaler (40% CPU Target)...${NC}"
 k3s kubectl apply -f ../config/redis/scaling-scenario-hpa/redis-servicemonitor.yaml
 k3s kubectl apply -f ../config/redis/scaling-scenario-hpa/redis-hpa-scaling.yaml
 echo -e "${GREEN}HPA is active and monitoring.${NC}\n"
 
-# 3. The Scale-Out Phase & Ghost Pod Observation
-echo -e "${RED}>>> ACTION REQUIRED: START SCALE-OUT TEST <<<${NC}"
-echo -e "1. Open a new terminal and run your k6 test using the provided script:"
-echo -e "   ${YELLOW}k6 run -e API_URL=http://<YOUR_ENTRYPOINT_IP>:30080 load-test.js${NC}"
-echo -e "2. Watch your Grafana dashboard. Wait for the HPA to spawn 'redis-3'."
-echo -e "3. Observe the 'Ghost Pod' phenomenon (0 CPU, 0 Hash Slots)."
-read -p "Press [Enter] ONLY AFTER 'redis-3' is running to proceed with manual intervention..."
+# 3. The Scale-Out Experiment: drive load and observe the Ghost Pod.
+#    This is the entire point of Phase 1. We deliberately do NOT reshard - hand-
+#    integrating the new node (add-node -> converge -> reshard) would just be
+#    reimplementing the operator by hand. The thesis claim is the GAP itself:
+#    native HPA provisions capacity it structurally cannot integrate.
+echo -e "${RED}>>> ACTION REQUIRED: START THE SCALE-OUT LOAD TEST <<<${NC}"
+echo -e "1. In a new terminal on the load generator, run k6 (load-test.js now fans"
+echo -e "   out across all 6 NodePorts automatically):"
+echo -e "   ${YELLOW}k6 run -o experimental-prometheus-rw load-test.js${NC}"
+echo -e "2. In Grafana, watch Redis CPU cross the 40% target and the HPA scale the"
+echo -e "   StatefulSet out (redis-3, then redis-4/5 as the load persists)."
+echo -e "3. THE KEY OBSERVATION (Ghost Pod): each new pod joins the Kubernetes"
+echo -e "   Deployment but NOT the Redis cluster - it owns 0 hash slots, draws ~0 CPU,"
+echo -e "   and serves no traffic. The original 3 masters stay saturated, so the HPA"
+echo -e "   keeps scaling toward maxReplicas while throughput/latency never improve."
+echo ""
+read -p "Press [Enter] once the HPA has scaled out (redis-3 is Running) to snapshot the evidence..."
 
-# 4. Manual Intervention: graft the Ghost Pod into the cluster, THEN reshard onto it.
-echo -e "\n${YELLOW}[3/4] Executing Manual Resharding Intervention...${NC}"
-# Tolerant block: a missing pod or a user Ctrl-C shouldn't abort the whole script.
+# 4. Evidence snapshot (best-effort): prove the scaled-out pods are Ghost Pods.
+echo -e "\n${YELLOW}[3/3] Capturing Ghost Pod evidence...${NC}"
 set +e
+echo -e "${BLUE}--- Kubernetes view: redis pods that EXIST ---${NC}"
+k3s kubectl get pods -n redis -l app=redis -o wide
 
-NEW_NODE="redis-3"   # the pod the HPA scaled out; repeat this block for redis-4/5 if more appeared
+echo -e "\n${BLUE}--- Redis view: nodes actually IN the cluster ---${NC}"
+echo -e "(The Kubernetes count above EXCEEDS this; the difference is the Ghost Pod[s].)"
+k3s kubectl exec redis-0 -n redis -- redis-cli cluster nodes
 
-# 4a. JOIN the node. The StatefulSet started redis-3, but a vanilla Redis node never
-#     issues CLUSTER MEET on its own, so it sits isolated with 0 slots and no ID the
-#     cluster recognizes - the "Ghost Pod". add-node grafts it in as a master. Without
-#     this the reshard has no valid receiving node: the prompt wants a 40-char node ID,
-#     so typing the pod name 'redis-3' is rejected ("node is not known or not a master").
-new_ip=$(k3s kubectl get pod "${NEW_NODE}" -n redis -o jsonpath='{.status.podIP}' 2>/dev/null)
-anchor_ip=$(k3s kubectl get pod redis-0 -n redis -o jsonpath='{.status.podIP}')
-
-if [[ -z "${new_ip}" ]]; then
-    echo -e "${RED}Could not find pod ${NEW_NODE}. Did the scale-out happen? Skipping intervention.${NC}"
+echo -e "\n${BLUE}--- The Ghost itself (redis-3): an isolated 1-node island, 0 slots ---${NC}"
+if k3s kubectl get pod redis-3 -n redis >/dev/null 2>&1; then
+    k3s kubectl exec redis-3 -n redis -- redis-cli cluster info \
+        | grep -E "cluster_known_nodes|cluster_slots_assigned|cluster_size"
 else
-    # Idempotent: only MEET the node if the cluster doesn't already know its IP.
-    if k3s kubectl exec redis-0 -n redis -- redis-cli cluster nodes | grep -q "${new_ip}:6379"; then
-        echo -e "${GREEN}${NEW_NODE} (${new_ip}) is already a cluster member; skipping add-node.${NC}"
-    else
-        echo -e "Joining Ghost Pod ${NEW_NODE} (${new_ip}) into the cluster as a master..."
-        k3s kubectl exec -it redis-0 -n redis -- \
-            redis-cli --cluster add-node "${new_ip}:6379" "${anchor_ip}:6379"
-    fi
-
-    # 4b. Resolve the node's real 40-char cluster ID (NOT the pod name). Note: no -t on
-    #     this exec - a TTY would append \r and corrupt the captured ID.
-    new_id=$(k3s kubectl exec redis-0 -n redis -- redis-cli cluster nodes \
-        | grep "${new_ip}:6379" | awk '{print $1}')
-
-    if [[ -z "${new_id}" ]]; then
-        echo -e "${RED}Could not resolve ${NEW_NODE}'s node ID after add-node. Skipping reshard.${NC}"
-    else
-        # Move ~4096 slots (16384 / 4 masters) onto the new node, taken evenly from all
-        # existing masters. Non-interactive (--cluster-yes) so there are no prompts.
-        echo -e "Receiving node: ${NEW_NODE} -> ID ${YELLOW}${new_id}${NC}"
-        echo -e "Resharding 4096 slots from all masters onto ${NEW_NODE}..."
-        k3s kubectl exec -it redis-0 -n redis -- redis-cli --cluster reshard 127.0.0.1:6379 \
-            --cluster-from all \
-            --cluster-to "${new_id}" \
-            --cluster-slots 4096 \
-            --cluster-yes
-        echo -e "${GREEN}Reshard complete. Verify with:${NC}"
-        echo -e "   k3s kubectl exec -it redis-0 -n redis -- redis-cli --cluster check 127.0.0.1:6379"
-    fi
+    echo -e "(redis-3 not present yet - did the HPA actually scale out?)"
 fi
 
+echo -e "\n${BLUE}--- HPA status: replicas climbing, CPU target never satisfied ---${NC}"
+k3s kubectl get hpa redis-hpa -n redis
 set -e
 
-# 5. The Scale-In Phase & Data Cliff Observation
-echo -e "\n${RED}>>> ACTION REQUIRED: START SCALE-IN TEST <<<${NC}"
-echo -e "1. Stop your k6 load test in the other terminal."
-echo -e "2. Keep an eye on Grafana. The HPA has a 5-minute stabilization window."
-echo -e "3. Watch for 'redis-3' to be terminated and observe the HTTP 500 errors and Data Cliff."
-read -p "Press [Enter] once you have captured the failure metrics in Grafana to finish Phase 1..."
-
-echo -e "\n${GREEN}Phase 1 Complete. You are ready to run the Phase 2 teardown script.${NC}"
+echo -e "\n${GREEN}=== Phase 1 (Scale-Out / Ghost Pod) Complete ===${NC}"
+echo -e "Capture the Grafana panels (replica count vs. throughput/latency/errors) for"
+echo -e "your Results section, then stop k6 and run the Phase 2 teardown script."
