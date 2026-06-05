@@ -204,10 +204,12 @@ for _ in $(seq 1 150); do
 done
 k3s kubectl rollout status statefulset redis-cluster-leader -n redis --timeout=600s
 
-# Wait for the scale-out reshard to FULLY settle before scaling in. The operator moves a
-# quarter of the slots onto leader-3; if we scale in mid-migration we leave an OPEN slot the
-# operator CANNOT self-heal - it loops forever on "Please fix your cluster problems". Gate on:
-# all 16384 slots covered AND none left open. Generous window: resharding is slow on small nodes.
+# Wait for the scale-out reshard to settle before scaling in (all 16384 slots covered, none
+# open). NOTE: the Opstree operator has NO self-healing capability. If a reshard is interrupted
+# it leaves a slot stuck migrating/importing ("open") that it cannot repair on its own -
+# redis-cli then refuses every subsequent reshard ("Please fix your cluster problems") and the
+# operator loops indefinitely. We deliberately do NOT auto-repair here: if the run wedges, that
+# wedge is the finding (a human would have to run `redis-cli --cluster fix` manually to recover).
 echo -e "Waiting for the scale-out reshard to settle (all slots covered, none open)..."
 settled=0
 for _ in $(seq 1 120); do   # up to ~10 min
@@ -218,8 +220,8 @@ for _ in $(seq 1 120); do   # up to ~10 min
     sleep 5
 done
 if [[ "$settled" -ne 1 ]]; then
-    echo -e "${RED}Scale-out reshard did not settle (open slots remain). Scaling in now risks a stuck${NC}"
-    echo -e "${RED}cluster - fix first:  k3s kubectl exec -it redis-cluster-leader-0 -n redis -- redis-cli --cluster fix 127.0.0.1:6379${NC}"
+    echo -e "${RED}Reshard did not settle (an open slot remains). The operator cannot self-heal this;${NC}"
+    echo -e "${RED}the scale-in below will wedge - that is the documented finding.${NC}"
 fi
 
 echo -e "\n${BLUE}--- BEFORE scale-in: 4 masters, all 16384 slots covered ---${NC}"
@@ -228,6 +230,44 @@ k3s kubectl exec redis-cluster-leader-0 -n redis -- redis-cli cluster info | gre
 read -p "Press [Enter] to scale IN to 3 and watch the operator DRAIN leader-3 first..."
 echo -e "${YELLOW}Pinning to 3 (operator migrates leader-3's slots to survivors, THEN removes it)...${NC}"
 k3s kubectl annotate scaledobject redis-keda-scaler -n redis autoscaling.keda.sh/paused-replicas="3" --overwrite
+
+# The operator drains leader-3 then removes it. CRITICAL FINDING: it has NO self-healing. If the
+# drain reshard is interrupted, a slot is left "open" (migrating/importing) that the operator
+# CANNOT repair on its own - it loops forever on "Please fix your cluster problems" and never
+# removes leader-3. There is no in-cluster automation for this: recovery is a MANUAL operation
+# performed by a HUMAN OPERATOR. This script does NOT auto-repair; instead, when the operator
+# wedges, the human must OPEN A NEW TERMINAL and manually trigger `redis-cli --cluster fix`. That
+# manual toil is precisely the operational cost the thesis is documenting, so we make it an
+# explicit, required, verified step rather than hiding it behind an automated fix.
+echo -e "Giving the operator time to drain and remove leader-3 on its own..."
+for _ in $(seq 1 36); do   # ~3 min grace for a clean (uninterrupted) drain
+    k3s kubectl get pod redis-cluster-leader-3 -n redis >/dev/null 2>&1 || break
+    sleep 5
+done
+
+# Wedge signature: leader-3 still present AND an open slot remains => the operator is stuck and
+# only a human can recover it.
+if k3s kubectl get pod redis-cluster-leader-3 -n redis >/dev/null 2>&1 \
+   && k3s kubectl exec redis-cluster-leader-0 -n redis -- redis-cli --cluster check 127.0.0.1:6379 2>/dev/null | grep -q "are open"; then
+    echo -e "\n${RED}>>> ACTION REQUIRED: THE OPERATOR IS WEDGED (it has NO self-healing) <<<${NC}"
+    echo -e "An interrupted reshard left an OPEN slot the operator cannot repair; it is looping on"
+    echo -e "\"Please fix your cluster problems\" and will never remove leader-3 on its own."
+    echo -e "${RED}A HUMAN OPERATOR must recover it. OPEN A NEW TERMINAL and run:${NC}"
+    echo -e "   ${YELLOW}k3s kubectl exec -it redis-cluster-leader-0 -n redis -- redis-cli --cluster fix 127.0.0.1:6379${NC}"
+    # ENSURE the manual --cluster fix was actually triggered: do not continue until the open slot
+    # is gone, re-prompting if the human hasn't run it (or it didn't take) yet.
+    while true; do
+        read -p "Press [Enter] here AFTER you have run --cluster fix in the OTHER terminal..."
+        if k3s kubectl exec redis-cluster-leader-0 -n redis -- redis-cli --cluster check 127.0.0.1:6379 2>/dev/null | grep -q "are open"; then
+            echo -e "${RED}An open slot is STILL present - the manual fix hasn't cleared it. Run it again, then press [Enter].${NC}"
+        else
+            echo -e "${GREEN}Open slot cleared by the manual --cluster fix - the operator can now finish the scale-in.${NC}"
+            break
+        fi
+    done
+fi
+
+# After a clean drain (happy path) OR the human's manual --cluster fix, the operator removes leader-3.
 k3s kubectl wait --for=delete pod/redis-cluster-leader-3 -n redis --timeout=600s
 
 echo -e "\n${GREEN}--- AFTER scale-in: still 16384 slots, no data loss (no cliff) ---${NC}"
