@@ -77,6 +77,7 @@ set +e
 # so the namespace deletion below isn't blocked by lingering finalizers. The RedisCluster
 # is now a Helm release, so uninstall it (removes the CR + its ServiceMonitor).
 k3s kubectl delete -f ../config/redis/scaling-scenario-operator-keda/redis-keda-scaling.yaml --ignore-not-found=true
+k3s kubectl delete -f ../config/redis/scaling-scenario-operator-keda/redis-servicemonitor.yaml --ignore-not-found=true
 helm uninstall redis-cluster -n redis 2>/dev/null
 # Delete the HPA scenario manifests too, in case Phase 1 ran before this.
 k3s kubectl delete -f ../config/redis/scaling-scenario-hpa/redis-hpa-scaling.yaml --ignore-not-found=true
@@ -112,6 +113,11 @@ helm repo add ot-helm https://ot-container-kit.github.io/helm-charts/ >/dev/null
 helm repo update ot-helm >/dev/null
 helm upgrade --install redis-cluster ot-helm/redis-cluster -n redis \
     -f ../config/redis/scaling-scenario-operator-keda/redis-operator-cluster-values.yaml
+
+# Per the Opstree monitoring docs, neither the operator nor the chart's serviceMonitor flag
+# actually creates a ServiceMonitor - you must apply one yourself. Without it Prometheus
+# scrapes nothing and KEDA's cache-miss query reads 0. This wires the exporter into Prometheus.
+k3s kubectl apply -f ../config/redis/scaling-scenario-operator-keda/redis-servicemonitor.yaml
 
 # Spin the FastAPI entrypoint back up in parallel (same rationale as Phase 1): its
 # REDIS_STARTUP_NODES includes redis-cluster-leader, so it connects automatically

@@ -72,8 +72,10 @@ redisExporter:
       cpu: "50m"
       memory: "64Mi"
 
-# THE operator-method win: enabling Prometheus scraping is one flag here. extraLabels
-# release=prometheus is what makes kube-prometheus-stack adopt the ServiceMonitor.
+# NOTE: per the Opstree monitoring docs, neither the operator nor this chart flag actually
+# creates a ServiceMonitor (confirmed: helm rendered none despite enabled=true). The setup
+# script applies a standalone one (redis-servicemonitor.yaml) instead. Left enabled because it
+# provisions the exporter -metrics services and is otherwise harmless.
 serviceMonitor:
   enabled: true
   interval: 15s

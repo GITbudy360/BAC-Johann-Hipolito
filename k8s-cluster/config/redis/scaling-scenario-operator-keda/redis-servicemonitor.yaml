@@ -1,0 +1,28 @@
+# Standalone ServiceMonitor for the operator's Redis exporter.
+#
+# Per the Opstree monitoring docs (redis-operator.opstree.dev/docs/monitoring), neither the
+# operator nor the chart's `serviceMonitor.enabled` flag creates a ServiceMonitor - you must
+# apply one yourself. Confirmed on this cluster: `helm get manifest` rendered no ServiceMonitor
+# despite serviceMonitor.enabled=true, so Prometheus scraped nothing and KEDA's cache-miss
+# query read 0. This manifest is that required piece (the docs' "cluster" example, adapted with
+# the labels this cluster's -metrics services actually carry, and the kube-prometheus-stack
+# adoption label).
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: redis-operator-monitor
+  namespace: redis
+  labels:
+    # kube-prometheus-stack only adopts ServiceMonitors carrying this release label.
+    release: prometheus
+spec:
+  # Selects BOTH redis-cluster-leader-metrics and redis-cluster-follower-metrics, which share
+  # these two labels. (No namespaceSelector: defaults to this SM's namespace, redis, where the
+  # services live - same pattern as the HPA scenario's ServiceMonitor.)
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: metrics
+      redis_setup_type: cluster
+  endpoints:
+    - port: redis-exporter   # the named 9121 exporter port on the -metrics services
+      interval: 15s
