@@ -11,6 +11,10 @@ NC='\033[0m' # No Color
 # Resolve paths relative to this script so it works no matter where it's invoked from
 cd "$(dirname "$0")"
 
+# helm needs a kubeconfig; k3s keeps its at the path below. (k3s kubectl embeds it,
+# but plain `helm` does not.) Respect an already-exported KUBECONFIG if present.
+export KUBECONFIG="${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
+
 echo -e "${BLUE}=== Phase 3: Operator + KEDA Scenario - Topology-Aware Scale-Out ===${NC}\n"
 
 # 0. Sanity-check the cluster-wide controllers this scenario depends on. They are
@@ -54,9 +58,10 @@ echo -e "${YELLOW}[1/4] Scorching prior Redis state (manifests, PVCs, namespace)
 # Drop set -e: most of these resources won't exist on a fresh cluster, and that's fine.
 set +e
 # Delete the Operator/KEDA custom resources FIRST, while their controllers are alive,
-# so the namespace deletion below isn't blocked by lingering finalizers.
+# so the namespace deletion below isn't blocked by lingering finalizers. The RedisCluster
+# is now a Helm release, so uninstall it (removes the CR + its ServiceMonitor).
 k3s kubectl delete -f ../config/redis/scaling-scenario-operator-keda/redis-keda-scaling.yaml --ignore-not-found=true
-k3s kubectl delete -f ../config/redis/scaling-scenario-operator-keda/redis-operator-cluster.yaml --ignore-not-found=true
+helm uninstall redis-cluster -n redis 2>/dev/null
 # Delete the HPA scenario manifests too, in case Phase 1 ran before this.
 k3s kubectl delete -f ../config/redis/scaling-scenario-hpa/redis-hpa-scaling.yaml --ignore-not-found=true
 k3s kubectl delete -f ../config/redis/scaling-scenario-hpa/redis-servicemonitor.yaml --ignore-not-found=true
@@ -83,7 +88,14 @@ echo -e "${GREEN}Clean slate confirmed.${NC}\n"
 # 2. Deploy the operator-managed Redis Cluster.
 echo -e "${YELLOW}[2/4] Deploying the operator-managed Redis Cluster (clusterSize 3)...${NC}"
 k3s kubectl create namespace redis --dry-run=client -o yaml | k3s kubectl apply -f -
-k3s kubectl apply -f ../config/redis/scaling-scenario-operator-keda/redis-operator-cluster.yaml
+# Ensure the Opstree chart repo is available (idempotent), then deploy the cluster via
+# the operator's OWN Helm chart. One values file gives us the RedisCluster, the exporter,
+# AND the ServiceMonitor - the operator-method ease the thesis contrasts against the HPA
+# path's hand-assembled ConfigMap + StatefulSet + manual cluster-create + ServiceMonitor.
+helm repo add ot-helm https://ot-container-kit.github.io/helm-charts/ >/dev/null 2>&1 || true
+helm repo update ot-helm >/dev/null
+helm upgrade --install redis-cluster ot-helm/redis-cluster -n redis \
+    -f ../config/redis/scaling-scenario-operator-keda/redis-operator-cluster-values.yaml
 
 # Spin the FastAPI entrypoint back up in parallel (same rationale as Phase 1): its
 # REDIS_STARTUP_NODES includes redis-cluster-leader, so it connects automatically

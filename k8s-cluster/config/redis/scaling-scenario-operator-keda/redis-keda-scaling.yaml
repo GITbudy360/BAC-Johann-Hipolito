@@ -18,6 +18,12 @@ spec:
     replicas: 4
   triggers:
     - type: prometheus
+      # Value (not the KEDA default AverageValue): with AverageValue the threshold is
+      # interpreted PER REPLICA, so a cache-miss RATIO of ~0.25 vs threshold 0.15 would
+      # compute desired=ceil(0.25/0.15)=2 and never scale past minReplicaCount. With
+      # Value, desired=ceil(currentReplicas * ratio/threshold), so it fires when the
+      # ratio exceeds the threshold as intended.
+      metricType: Value
       metadata:
         # Update this to match your actual internal Prometheus Service URL
         serverAddress: http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090

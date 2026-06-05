@@ -20,12 +20,9 @@ spec:
   redisExporter:
     enabled: true
     image: 'ghcr.io/oliver006/redis_exporter:latest'
-    serviceMonitor:
-      enabled: true
-      interval: 15s
-      # This critical label tells the kube-prometheus-stack to pick it up
-      labels:
-        release: prometheus
+    # NOTE: ServiceMonitor is NOT a field of the RedisCluster CR in v1beta2 (it's an
+    # Opstree *Helm chart* value). Prometheus scraping of the exporter is wired up via
+    # a standalone ServiceMonitor manifest applied by the setup script instead.
     resources:
       requests:
         cpu: "50m"

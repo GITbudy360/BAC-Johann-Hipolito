@@ -1,0 +1,74 @@
+# Helm values for ot-helm/redis-cluster -- Phase 3 (Operator + KEDA scenario).
+#
+# Deployed by scripts/3-set-up-operator-test-environment.sh as the Helm release
+# "redis-cluster" in namespace "redis". That yields a RedisCluster CR named
+# redis-cluster, so the KEDA ScaledObject's scaleTargetRef.name=redis-cluster and
+# the redis-cluster-leader StatefulSet/Service names all line up automatically.
+#
+# This single file replaces the raw RedisCluster CR (redis-operator-cluster.yaml) AND
+# the hand-written ServiceMonitor the HPA path needs -- the "ease of configuration"
+# contrast the thesis is making.
+
+redisCluster:
+  clusterSize: 3
+
+  # Match the HPA scenario: ephemeral (no PVC) so storage isn't an extra variable in
+  # the comparison. Flip to true to bring the operator's persistence into scope.
+  persistenceEnabled: false
+
+  # Use the SAME Redis build as the HPA scenario (redis:7.2-alpine) rather than the
+  # chart default (quay.io/opstree/redis:v7.0.15), so the scenarios differ only in the
+  # scaling method, not the Redis version. (Keys confirmed against the chart values.)
+  image: redis
+  tag: "7.2-alpine"
+  imagePullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "250m"
+      memory: "256Mi"
+  leader:
+    # Do NOT set leader.replicas here: it renders spec.redisLeader.replicas, which
+    # OVERRIDES clusterSize in the operator. KEDA scales via spec.clusterSize (our
+    # /scale mapping), so pinning leader.replicas would make scaling a no-op. Let
+    # clusterSize drive the master count.
+    #
+    # No two leaders (masters) on the same mini-PC node, mirroring the old CR's intent.
+    # VERIFY: the matchLabels must match the chart's actual leader pod labels - check
+    #   k3s kubectl get pods -n redis -l redis_setup_type=cluster --show-labels
+    # and adjust if the leaders aren't labelled app=redis-cluster-leader.
+    affinity:
+      podAntiAffinity:
+        # Preferred (not required) so a scale-out to 4-6 masters can't get stuck Pending
+        # if a node is momentarily unschedulable - the scheduler still spreads leaders
+        # one-per-node when it can. weight 100 = strongest preference.
+        preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            labelSelector:
+              matchLabels:
+                app: redis-cluster-leader
+            topologyKey: kubernetes.io/hostname
+
+# Exporter sidecar: source of redis_keyspace_hits_total / _misses_total that KEDA's
+# cache-miss-ratio trigger reads. Mirrors the oliver006 exporter used in the HPA
+# scenario for identical metric semantics.
+redisExporter:
+  enabled: true
+  image: ghcr.io/oliver006/redis_exporter
+  tag: latest
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "64Mi"
+
+# THE operator-method win: enabling Prometheus scraping is one flag here. extraLabels
+# release=prometheus is what makes kube-prometheus-stack adopt the ServiceMonitor.
+serviceMonitor:
+  enabled: true
+  interval: 15s
+  scrapeTimeout: 10s
+  extraLabels:
+    release: prometheus
