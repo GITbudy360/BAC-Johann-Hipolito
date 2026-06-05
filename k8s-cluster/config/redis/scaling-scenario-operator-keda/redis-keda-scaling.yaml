@@ -13,6 +13,25 @@ spec:
   maxReplicaCount: 6
   advanced:
     restoreToOriginalReplicaCount: true
+    # IDENTICAL to the HPA's behavior block (scaling-scenario-hpa/redis-hpa-scaling.yaml) so the
+    # two scenarios differ only in the scaling MECHANISM, not autoscaler dynamics. KEDA passes
+    # this straight through to its managed HPA. scaleUp is rate-limited to one node at a time
+    # (180s apart) so a topology-aware reshard can finish before the next bump - this is what
+    # prevents the flapping that interrupted reshards and broke earlier runs.
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: 300
+          policies:
+          - type: Pods
+            value: 1
+            periodSeconds: 60
+        scaleUp:
+          stabilizationWindowSeconds: 0
+          policies:
+          - type: Pods
+            value: 1
+            periodSeconds: 180
   fallback:
     failureThreshold: 3
     replicas: 4

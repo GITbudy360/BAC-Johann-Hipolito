@@ -191,11 +191,49 @@ k3s kubectl exec redis-cluster-leader-0 -n redis -- redis-cli --cluster check 12
 set -e
 
 # 6. The Scale-In Experiment: graceful, topology-aware drain (the operator's answer to the
-#    HPA data cliff). Size is driven deterministically via KEDA's paused-replicas annotation
-#    (overrides the metric for reproducibility): pin to 4 as setup, then to 3.
+#    HPA data cliff). To keep this controlled and reproducible we do NOT scale in from
+#    wherever step 4's metric-driven load happened to leave the cluster. Instead we first
+#    RESET to a known, settled 3-master baseline, then do SINGLE-STEP transitions only:
+#    3->4 to set up the node we will drain, then 4->3 to measure the drain itself.
+#    WHY single-step: the paused-replicas annotation pins clusterSize DIRECTLY and bypasses
+#    the behavior block's 1-pod-per-step rate limit, so a multi-master jump (e.g. a churned
+#    6->3) asks the operator to remove several masters at once - the uncontrolled collapse
+#    that orphaned ~5000 slots in earlier runs. One master at a time lets each reshard finish.
 echo -e "\n${RED}>>> SCALE-IN / GRACEFUL DRAIN <<<${NC}"
 set +e
 
+# Gate every transition on a fully settled cluster: exactly N ready leaders, all 16384 slots
+# covered, and no slot left "open" (migrating/importing). Returns 1 on timeout so the caller
+# can surface a wedge instead of charging ahead on a half-resharded cluster. NOTE: the Opstree
+# operator has NO self-healing - an interrupted reshard leaves an open slot it cannot repair
+# (redis-cli then refuses every reshard with "Please fix your cluster problems"); we never
+# auto-repair, so if this never settles, that wedge IS the finding.
+wait_settled() {
+    local want="$1" tries="${2:-120}" chk leaders   # default ~10 min at 5s/iteration
+    for _ in $(seq 1 "$tries"); do
+        leaders=$(k3s kubectl get statefulset redis-cluster-leader -n redis -o jsonpath='{.status.readyReplicas}' 2>/dev/null)
+        chk=$(k3s kubectl exec redis-cluster-leader-0 -n redis -- redis-cli --cluster check 127.0.0.1:6379 2>/dev/null)
+        if [[ "$leaders" == "$want" ]] \
+           && echo "$chk" | grep -q "All 16384 slots covered" \
+           && ! echo "$chk" | grep -q "are open"; then
+            return 0
+        fi
+        sleep 5
+    done
+    return 1
+}
+
+# 6a. RESET to a settled 3-master baseline (undo any metric-driven scale-out from step 4).
+echo -e "${YELLOW}[reset] Pinning to a settled 3-master baseline before the controlled scale-in...${NC}"
+k3s kubectl annotate scaledobject redis-keda-scaler -n redis autoscaling.keda.sh/paused-replicas="3" --overwrite
+if wait_settled 3; then
+    echo -e "${GREEN}Baseline reached: 3 masters, all 16384 slots covered, none open.${NC}\n"
+else
+    echo -e "${RED}Could not reach a clean 3-master baseline (open slot or stuck drain). The cluster${NC}"
+    echo -e "${RED}came into this step churned; recover with --cluster fix before trusting the run below.${NC}\n"
+fi
+
+# 6b. SINGLE-STEP scale-OUT 3 -> 4 (creates leader-3, the master we will then drain).
 echo -e "${YELLOW}Pinning to 4 (operator adds leader-3 and RESHARDS slots onto it)...${NC}"
 k3s kubectl annotate scaledobject redis-keda-scaler -n redis autoscaling.keda.sh/paused-replicas="4" --overwrite
 for _ in $(seq 1 150); do
@@ -204,22 +242,8 @@ for _ in $(seq 1 150); do
 done
 k3s kubectl rollout status statefulset redis-cluster-leader -n redis --timeout=600s
 
-# Wait for the scale-out reshard to settle before scaling in (all 16384 slots covered, none
-# open). NOTE: the Opstree operator has NO self-healing capability. If a reshard is interrupted
-# it leaves a slot stuck migrating/importing ("open") that it cannot repair on its own -
-# redis-cli then refuses every subsequent reshard ("Please fix your cluster problems") and the
-# operator loops indefinitely. We deliberately do NOT auto-repair here: if the run wedges, that
-# wedge is the finding (a human would have to run `redis-cli --cluster fix` manually to recover).
-echo -e "Waiting for the scale-out reshard to settle (all slots covered, none open)..."
-settled=0
-for _ in $(seq 1 120); do   # up to ~10 min
-    chk=$(k3s kubectl exec redis-cluster-leader-0 -n redis -- redis-cli --cluster check 127.0.0.1:6379 2>/dev/null)
-    if echo "$chk" | grep -q "All 16384 slots covered" && ! echo "$chk" | grep -q "are open"; then
-        settled=1; break
-    fi
-    sleep 5
-done
-if [[ "$settled" -ne 1 ]]; then
+echo -e "Waiting for the scale-out reshard to settle (4 masters, all slots covered, none open)..."
+if ! wait_settled 4; then
     echo -e "${RED}Reshard did not settle (an open slot remains). The operator cannot self-heal this;${NC}"
     echo -e "${RED}the scale-in below will wedge - that is the documented finding.${NC}"
 fi
@@ -228,6 +252,7 @@ echo -e "\n${BLUE}--- BEFORE scale-in: 4 masters, all 16384 slots covered ---${N
 k3s kubectl exec redis-cluster-leader-0 -n redis -- redis-cli cluster info | grep -E 'cluster_state|cluster_slots_assigned|cluster_slots_ok'
 
 read -p "Press [Enter] to scale IN to 3 and watch the operator DRAIN leader-3 first..."
+# 6c. SINGLE-STEP scale-IN 4 -> 3 (the measurement: graceful drain of exactly one master).
 echo -e "${YELLOW}Pinning to 3 (operator migrates leader-3's slots to survivors, THEN removes it)...${NC}"
 k3s kubectl annotate scaledobject redis-keda-scaler -n redis autoscaling.keda.sh/paused-replicas="3" --overwrite
 
@@ -270,8 +295,18 @@ fi
 # After a clean drain (happy path) OR the human's manual --cluster fix, the operator removes leader-3.
 k3s kubectl wait --for=delete pod/redis-cluster-leader-3 -n redis --timeout=600s
 
-echo -e "\n${GREEN}--- AFTER scale-in: still 16384 slots, no data loss (no cliff) ---${NC}"
+# 6d. HONEST after-check: only claim "no cliff" if the cluster is genuinely whole. Read the
+#     real numbers and compare - never assert zero data loss we did not verify.
+echo -e "\n${BLUE}--- AFTER scale-in ---${NC}"
 k3s kubectl exec redis-cluster-leader-0 -n redis -- redis-cli cluster info | grep -E 'cluster_state|cluster_slots_assigned|cluster_slots_ok'
+state=$(k3s kubectl exec redis-cluster-leader-0 -n redis -- redis-cli cluster info 2>/dev/null | tr -d '\r' | awk -F: '/^cluster_state:/{print $2}')
+slots_ok=$(k3s kubectl exec redis-cluster-leader-0 -n redis -- redis-cli cluster info 2>/dev/null | tr -d '\r' | awk -F: '/^cluster_slots_ok:/{print $2}')
+if [[ "$state" == "ok" && "$slots_ok" == "16384" ]]; then
+    echo -e "${GREEN}Graceful scale-in CONFIRMED: cluster_state=ok, all 16384 slots present - no data cliff.${NC}"
+else
+    echo -e "${RED}Scale-in did NOT complete cleanly: cluster_state=${state:-?} slots_ok=${slots_ok:-?} (expected ok / 16384).${NC}"
+    echo -e "${RED}That is an operator-side data cliff - report it honestly; do not claim zero data loss.${NC}"
+fi
 k3s kubectl exec redis-cluster-leader-0 -n redis -- redis-cli --cluster check 127.0.0.1:6379
 
 # Resume metric-driven autoscaling.

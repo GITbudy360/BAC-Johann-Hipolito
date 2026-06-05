@@ -2,19 +2,34 @@ import http from 'k6/http';
 import { check } from 'k6';
 import { randomString, randomIntBetween } from 'https://jslib.k6.io/k6-utils/1.2.0/index.js';
 
+// --- Load profile: a long, steady plateau --------------------------------
+// The original 3-minute spike (30s up / 2m hold / 30s down) was too short for the
+// MANUAL scale experiments in scripts 1 and 3. Those need live, CONSTANT traffic for
+// long enough to: populate data, let the autoscaler add a node, let that node's
+// reshard SETTLE, and THEN trigger the scale-in while requests are still in flight -
+// otherwise the client-impact half of the data-safety metric (errors/latency during
+// the drain) has no traffic to measure.
+//
+// Tune STEADY_RATE so it crosses BOTH the HPA's 40% CPU target and KEDA's cache-miss
+// threshold, and keep it the SAME across both scenarios so the only variable is the
+// scaling MECHANISM. PLATEAU_MINUTES must outlast your whole out -> settle -> in flow;
+// override either via env (e.g. STEADY_RATE=800 PLATEAU_MINUTES=25) without editing here.
+const STEADY_RATE = Number(__ENV.STEADY_RATE || 1000);        // requests/sec at the plateau
+const PLATEAU_MINUTES = Number(__ENV.PLATEAU_MINUTES || 20);  // how long to hold the plateau
+
 // Configuration using the Ramping Arrival Rate executor
 export const options = {
   scenarios: {
-    redis_hpa_trigger: {
+    redis_scaling_trigger: {
       executor: 'ramping-arrival-rate',
       startRate: 50,
-      timeUnit: '1s', // 50 requests per second
-      preAllocatedVUs: 50, // Allocate fewer VUs to save Windows VM resources
-      maxVUs: 300, // Maximum VUs k6 can scale to if requests get queued
+      timeUnit: '1s', // startRate is in requests per second
+      preAllocatedVUs: 50,  // initial VU pool (kept modest for the Windows VM)
+      maxVUs: 300,          // ceiling k6 can grow to if requests queue under load
       stages: [
-        { duration: '30s', target: 1000 },
-        { duration: '2m', target: 1000 },
-        { duration: '30s', target: 0 },   // Ramp down
+        { duration: '1m', target: STEADY_RATE },                   // ramp to the plateau
+        { duration: `${PLATEAU_MINUTES}m`, target: STEADY_RATE },  // long steady hold
+        { duration: '30s', target: 0 },                            // ramp down
       ],
     },
   },

@@ -21,8 +21,18 @@ spec:
   behavior:
       scaleDown:
         # Forces the HPA to wait 5 minutes after CPU drops before terminating a pod
-        stabilizationWindowSeconds: 300 
+        stabilizationWindowSeconds: 300
         policies:
         - type: Pods
           value: 1
           periodSeconds: 60 # Only kill 1 pod per minute maximum
+      scaleUp:
+        # Matched IDENTICALLY on the KEDA ScaledObject so autoscaler dynamics are a constant,
+        # not a variable, between the two scenarios. One pod at a time, 180s apart. (Harmless
+        # here - ghosts just appear one-by-one - but on the operator side it lets each reshard
+        # finish before the next node is added, removing the flapping confound.)
+        stabilizationWindowSeconds: 0
+        policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 180
