@@ -184,7 +184,39 @@ echo -e "\n${BLUE}--- Cluster topology: EVERY master owns slots (no Ghost Pod) -
 k3s kubectl exec redis-cluster-leader-0 -n redis -- redis-cli --cluster check 127.0.0.1:6379
 set -e
 
-echo -e "\n${GREEN}=== Phase 3 (Operator + KEDA Scale-Out) Complete ===${NC}"
-echo -e "Capture the Grafana panels (replica count vs. throughput/latency/errors) and the"
-echo -e "even slot distribution above for your Results section, then stop k6."
-echo -e "Run the Phase 4 teardown script when finished."
+# 6. The Scale-In Experiment: graceful, topology-aware drain (the operator's answer to the
+#    HPA data cliff). Size is driven deterministically via KEDA's paused-replicas annotation
+#    (overrides the metric for reproducibility): pin to 4 as setup, then to 3.
+echo -e "\n${RED}>>> SCALE-IN / GRACEFUL DRAIN <<<${NC}"
+set +e
+
+echo -e "${YELLOW}Pinning to 4 (operator adds leader-3 and RESHARDS slots onto it)...${NC}"
+k3s kubectl annotate scaledobject redis-keda-scaler -n redis autoscaling.keda.sh/paused-replicas="4" --overwrite
+for _ in $(seq 1 90); do
+    k3s kubectl get pod redis-cluster-leader-3 -n redis >/dev/null 2>&1 && break
+    sleep 2
+done
+k3s kubectl rollout status statefulset redis-cluster-leader -n redis --timeout=300s
+sleep 15  # let the operator finish migrating slots onto leader-3 before we measure
+
+echo -e "\n${BLUE}--- BEFORE scale-in: 4 masters, all 16384 slots covered ---${NC}"
+k3s kubectl exec redis-cluster-leader-0 -n redis -- redis-cli cluster info | grep -E 'cluster_state|cluster_slots_assigned|cluster_slots_ok'
+
+read -p "Press [Enter] to scale IN to 3 and watch the operator DRAIN leader-3 first..."
+echo -e "${YELLOW}Pinning to 3 (operator migrates leader-3's slots to survivors, THEN removes it)...${NC}"
+k3s kubectl annotate scaledobject redis-keda-scaler -n redis autoscaling.keda.sh/paused-replicas="3" --overwrite
+k3s kubectl wait --for=delete pod/redis-cluster-leader-3 -n redis --timeout=300s
+
+echo -e "\n${GREEN}--- AFTER scale-in: still 16384 slots, no data loss (no cliff) ---${NC}"
+k3s kubectl exec redis-cluster-leader-0 -n redis -- redis-cli cluster info | grep -E 'cluster_state|cluster_slots_assigned|cluster_slots_ok'
+k3s kubectl exec redis-cluster-leader-0 -n redis -- redis-cli --cluster check 127.0.0.1:6379
+
+# Resume metric-driven autoscaling.
+k3s kubectl annotate scaledobject redis-keda-scaler -n redis autoscaling.keda.sh/paused-replicas-
+set -e
+echo -e "${YELLOW}Grafana (PromQL): redis_cluster_slots_assigned stays 16384 and${NC}"
+echo -e "${YELLOW}sum(redis_db_keys{namespace=\"redis\"}) holds flat across scale-in - the opposite of Phase 1.${NC}"
+
+echo -e "\n${GREEN}=== Phase 3 (Operator + KEDA: Scale-Out + Graceful Scale-In) Complete ===${NC}"
+echo -e "Capture the Grafana panels (replicas vs. slots_assigned / total keys) for your"
+echo -e "Results section, then stop k6. Run the Phase 4 teardown script when finished."

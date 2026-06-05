@@ -11,7 +11,7 @@ NC='\033[0m' # No Color
 # Resolve paths relative to this script so it works no matter where it's invoked from
 cd "$(dirname "$0")"
 
-echo -e "${BLUE}=== Phase 1: Vanilla HPA Scenario - Scale-Out / Ghost Pod Experiment ===${NC}\n"
+echo -e "${BLUE}=== Phase 1: Vanilla HPA - Scale-Out (Ghost Pod) + Scale-In (Data Cliff) ===${NC}\n"
 
 # 0. Scorch any prior state so this run starts from a guaranteed clean slate
 echo -e "${YELLOW}[0/3] Scorching prior Redis state (manifests, PVCs, namespace)...${NC}"
@@ -124,6 +124,34 @@ echo -e "\n${BLUE}--- HPA status: replicas climbing, CPU target never satisfied 
 k3s kubectl get hpa redis-hpa -n redis
 set -e
 
-echo -e "\n${GREEN}=== Phase 1 (Scale-Out / Ghost Pod) Complete ===${NC}"
-echo -e "Capture the Grafana panels (replica count vs. throughput/latency/errors) for"
+# 5. The Scale-In Experiment: the reverse-ordinal data cliff.
+#    The cliff only appears when a SLOT-OWNING master is removed - HPA's scaled-out pods
+#    are ghosts (0 slots), so removing those loses nothing. We instead scale the StatefulSet
+#    down to 2, which (reverse-ordinal) deletes redis-2 - an ORIGINAL master owning ~1/3 of
+#    the hash slots - with NO drain and no replica. That is the exact StatefulSet mechanism
+#    HPA scale-in uses; we drive it by hand only to make the experiment deterministic.
+echo -e "\n${RED}>>> SCALE-IN / DATA CLIFF <<<${NC}"
+echo -e "Make sure your k6 load test has populated keys, so the cliff drops real data."
+read -p "Press [Enter] to record the BEFORE state and trigger the scale-in..."
+set +e
+
+echo -e "\n${BLUE}--- BEFORE: full slot coverage, cluster healthy ---${NC}"
+k3s kubectl exec redis-0 -n redis -- redis-cli cluster info | grep -E 'cluster_state|cluster_slots_assigned|cluster_slots_ok'
+
+# Remove HPA control so the scale-in is deterministic and can drop below its minReplicas.
+k3s kubectl delete -f ../config/redis/scaling-scenario-hpa/redis-hpa-scaling.yaml --ignore-not-found=true
+
+echo -e "${YELLOW}Scaling the StatefulSet 3 -> 2 (deletes redis-2, a slot-owning master)...${NC}"
+k3s kubectl scale statefulset redis -n redis --replicas=2
+k3s kubectl wait --for=delete pod/redis-2 -n redis --timeout=120s
+
+echo -e "\n${RED}--- AFTER: the data cliff - slots orphaned, cluster DOWN ---${NC}"
+k3s kubectl exec redis-0 -n redis -- redis-cli cluster info | grep -E 'cluster_state|cluster_slots_assigned|cluster_slots_ok'
+k3s kubectl exec redis-0 -n redis -- redis-cli --cluster check 127.0.0.1:6379
+set -e
+echo -e "${YELLOW}Grafana (PromQL): redis_cluster_slots_assigned drops below 16384, redis_cluster_state${NC}"
+echo -e "${YELLOW}flips to fail, and sum(redis_db_keys{namespace=\"redis\"}) steps down = lost keys.${NC}"
+
+echo -e "\n${GREEN}=== Phase 1 (Ghost Pod + Data Cliff) Complete ===${NC}"
+echo -e "Capture the Grafana panels (replicas vs. slots_assigned / total keys / error rate) for"
 echo -e "your Results section, then stop k6 and run the Phase 2 teardown script."

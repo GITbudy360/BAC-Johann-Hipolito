@@ -30,10 +30,14 @@ redisCluster:
       cpu: "250m"
       memory: "256Mi"
   leader:
-    # Do NOT set leader.replicas here: it renders spec.redisLeader.replicas, which
-    # OVERRIDES clusterSize in the operator. KEDA scales via spec.clusterSize (our
-    # /scale mapping), so pinning leader.replicas would make scaling a no-op. Let
-    # clusterSize drive the master count.
+    # The chart DEFAULTS leader.replicas to 3 and renders spec.redisLeader.replicas, which
+    # OVERRIDES clusterSize in the operator - so KEDA changing clusterSize adds NO leaders
+    # (observed: HPA reached 4 but no redis-cluster-leader-3). null removes the chart default
+    # (Helm 3 treats null as delete) so clusterSize alone drives the master count and KEDA
+    # scaling actually creates/reshards (and, on scale-in, drains) a leader.
+    # VERIFY: `helm template ... | grep -i replicas` must show NO redisLeader.replicas. If the
+    # chart still renders it, remap the /scale specReplicasPath to .spec.redisLeader.replicas.
+    replicas: null
     #
     # No two leaders (masters) on the same mini-PC node, mirroring the old CR's intent.
     # VERIFY: the matchLabels must match the chart's actual leader pod labels - check
@@ -51,6 +55,10 @@ redisCluster:
               matchLabels:
                 app: redis-cluster-leader
             topologyKey: kubernetes.io/hostname
+
+  # Same un-pin for followers, so clusterSize drives the whole cluster symmetrically.
+  follower:
+    replicas: null
 
 # Exporter sidecar: source of redis_keyspace_hits_total / _misses_total that KEDA's
 # cache-miss-ratio trigger reads. Mirrors the oliver006 exporter used in the HPA
