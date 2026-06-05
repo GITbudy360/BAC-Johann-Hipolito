@@ -53,6 +53,22 @@ else
     echo -e "${GREEN}/scale subresource already present on RedisCluster.${NC}\n"
 fi
 
+# KEDA's managed HPA ALSO requires the /scale subresource to report a status.selector,
+# otherwise it errors "the HPA target's scale is missing a selector" (ScalingActive=False)
+# and never scales. The operator's status exposes no selector field, so we add a
+# labelSelectorPath pointing at a small spec field that the apiserver DEFAULTS (spec
+# defaulting is always applied), giving the scale a non-empty selector. Idempotent and
+# re-asserted each run, same as the /scale patch above.
+# NOTE: the default must match the LEADER pod labels (the same label the leader affinity
+# uses). Verify with: k3s kubectl get pods -n redis -l app=redis-cluster-leader
+if [[ -z "$(k3s kubectl get crd "${RC_CRD}" -o jsonpath='{.spec.versions[0].subresources.scale.labelSelectorPath}' 2>/dev/null)" ]]; then
+    echo -e "${YELLOW}Adding scale labelSelectorPath on ${RC_CRD} (HPA selector requirement)...${NC}"
+    k3s kubectl patch crd "${RC_CRD}" --type=json -p='[{"op":"add","path":"/spec/versions/0/subresources/scale/labelSelectorPath","value":".spec.scaleSelector"},{"op":"add","path":"/spec/versions/0/schema/openAPIV3Schema/properties/spec/properties/scaleSelector","value":{"type":"string","default":"app=redis-cluster-leader"}}]'
+    echo -e "${GREEN}labelSelectorPath set (.spec.scaleSelector defaults to app=redis-cluster-leader).${NC}\n"
+else
+    echo -e "${GREEN}scale labelSelectorPath already present on RedisCluster.${NC}\n"
+fi
+
 # 1. Scorch any prior state so this run starts from a guaranteed clean slate.
 echo -e "${YELLOW}[1/4] Scorching prior Redis state (manifests, PVCs, namespace)...${NC}"
 # Drop set -e: most of these resources won't exist on a fresh cluster, and that's fine.
