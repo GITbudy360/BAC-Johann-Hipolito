@@ -37,6 +37,8 @@
 \usepackage[utf8]{inputenc}
 \usepackage{pdfpages}
 \usepackage[sfdefault]{carlito} % Ersatz für Calibri, sieht fast genau gleich aus
+\usepackage{microtype}      % besseres Justieren, weniger Überhänge am Rand
+\setlength{\emergencystretch}{3em} % letzter Ausweg: Zeile dehnen statt über den Rand laufen
 \usepackage[backend=biber,style=apa,hyperref=true]{biblatex}
 \usepackage{csquotes}
 \usepackage{hyperref}
@@ -153,6 +155,7 @@ Here is the abstract in English.
 \include{content/21_Hypothesis}
 \include{content/30_Technologies_Used}
 \include{content/40_Experiment_Architecture}
+\include{content/41_Experimental_Test_Flow}
 \include{content/50_Results}
 \include{content/60_Conclusion}
 

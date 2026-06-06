@@ -8,8 +8,14 @@ spec:
     apiVersion: apps/v1
     kind: StatefulSet
     name: redis
-  minReplicas: 3
-  maxReplicas: 6
+  # Baseline is 6 pods (3 masters + 3 replicas, see redis-hpa-cluster.yaml). minReplicas MUST
+  # equal that baseline, else the HPA would scale the StatefulSet down to 3 while idle and strip
+  # the replicas before the test. maxReplicas leaves room for the HPA to add Ghost Pods
+  # (redis-6/7/8) under load. NOTE: unlike KEDA's maxReplicaCount (which counts MASTERS only),
+  # this counts ALL pods incl. replicas + ghosts, so the raw numbers are NOT directly comparable
+  # across scenarios - a documented, intentional asymmetry; the matched part is the behavior block.
+  minReplicas: 6
+  maxReplicas: 9
   metrics:
     - type: ContainerResource # Changed from Resource
       containerResource:

@@ -36,7 +36,12 @@ metadata:
   namespace: redis
 spec:
   serviceName: redis-headless
-  replicas: 3
+  # 6 pods = 3 masters + 3 replicas. The master/replica ROLES are assigned at runtime by the
+  # setup script's `redis-cli --cluster create --cluster-replicas 1` - a vanilla StatefulSet
+  # cannot express "pod X replicates pod Y", which is exactly the topology gap the operator
+  # closes declaratively. The HPA's minReplicas is pinned to 6 (see redis-hpa-scaling.yaml) so
+  # it won't scale the StatefulSet down to 3 while idle and strip the replicas before the test.
+  replicas: 6
   selector:
     matchLabels:
       app: redis

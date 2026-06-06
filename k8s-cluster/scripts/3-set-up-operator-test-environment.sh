@@ -223,6 +223,17 @@ wait_settled() {
     return 1
 }
 
+# Quiesce BEFORE any resharding below. Live writes landing on slots that are mid-migration are
+# the dominant cause of an INTERRUPTED reshard (the open-slot wedge), and BOTH the reset (6a)
+# and the scale-out (6b) below reshard. Stopping k6 first is the single most effective way to
+# get a reproducible, graceful scale-in. Data loss stays fully measurable with no traffic
+# (keys have no TTL), so quiescing costs us nothing for the data-safety result.
+echo -e "\n${RED}>>> STOP k6 NOW <<<${NC}"
+echo -e "Terminate the k6 load test and wait for the request rate to fall to 0 before continuing"
+echo -e "(watch it flatline in Grafana - ideally confirm the redis write-command rate is ~0 too)."
+echo -e "Resharding under live writes is what interrupts the operator; quiescing avoids the wedge."
+read -p "Press [Enter] once k6 is stopped and traffic has drained to 0..."
+
 # 6a. RESET to a settled 3-master baseline (undo any metric-driven scale-out from step 4).
 echo -e "${YELLOW}[reset] Pinning to a settled 3-master baseline before the controlled scale-in...${NC}"
 k3s kubectl annotate scaledobject redis-keda-scaler -n redis autoscaling.keda.sh/paused-replicas="3" --overwrite

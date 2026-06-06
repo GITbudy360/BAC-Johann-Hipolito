@@ -1,0 +1,139 @@
+\section{Experimental Test Flow}\label{sec:test-flow}
+
+The evaluation contrasts two mechanisms for autoscaling a sharded, stateful Redis
+Cluster on the same six-node \texttt{k3s} cluster: (i) the native Kubernetes
+\emph{Horizontal Pod Autoscaler} (HPA) acting on a self-managed cluster, and (ii) a
+domain-specific \emph{operator} driven by \emph{Kubernetes Event-driven Autoscaling}
+(KEDA). Both scenarios are exercised with an identical, deterministic six-phase
+procedure so that the scaling mechanism is the sole independent variable:
+(1)~scorch all prior state and scale the FastAPI entrypoint to zero;
+(2)~provision the namespace, the Redis Cluster, and the entrypoint;
+(3)~deploy the autoscaler;
+(4)~drive a controlled \texttt{k6} workload and observe the scale-out;
+(5)~quiesce the workload and perform a controlled scale-in; and
+(6)~capture the resulting topology and key-space metrics in Grafana.
+The workload, resource requests, monitoring stack, and autoscaler \texttt{behavior}
+parameters are held constant; only the resharding intelligence differs.
+
+A Redis Cluster partitions its key space into $16{,}384$ hash slots distributed
+across master nodes, so adding or removing a master requires \emph{resharding}---the
+live migration of slots between nodes---rather than the mere addition of a pod
+\cite{redis:clusterspec,redis:scaling}. The central question of the test flow is
+whether each mechanism can perform this slot-level work, because Kubernetes' native
+workload primitives manage pod \emph{count} but possess no knowledge of cluster
+\emph{topology}~\cite{k8s:operator}.
+
+\subsection{Scenario A: Native HPA on a Self-Managed Redis Cluster}\label{subsec:flow-hpa}
+
+\begin{enumerate}
+  \item \textbf{Provisioning.} A StatefulSet of six Redis pods is applied and the
+  cluster is formed imperatively with
+  \texttt{redis-cli -{}-cluster create -{}-cluster-replicas 1}, yielding three masters
+  (\texttt{redis-0..2}) each with one replica (\texttt{redis-3..5}). Because a
+  StatefulSet manifest cannot express the master--replica relationship, this role
+  assignment is necessarily a runtime operation external to the declarative
+  configuration~\cite{k8s:statefulset,redis:clusterspec}.
+
+  \item \textbf{Autoscaler.} An HPA targets the StatefulSet with a $40\%$ average
+  CPU-utilisation goal; per-pod CPU requests are declared so the controller can
+  compute utilisation~\cite{k8s:hpa}. \texttt{minReplicas} is pinned to the six-pod
+  baseline so the idle controller cannot scale down and strip the replicas before
+  the run.
+
+  \item \textbf{Scale-out.} The workload drives master CPU past the target. The HPA
+  raises the desired replica count according to
+  $\mathrm{desired} = \lceil \mathrm{current} \times
+  (\mathrm{currentMetric}/\mathrm{targetMetric}) \rceil$~\cite{k8s:hpa} and appends
+  pods beginning at \texttt{redis-6}. These pods join the StatefulSet but are never
+  issued a \texttt{CLUSTER MEET} nor assigned slots, so each remains an isolated
+  single-node island---a \emph{ghost pod} owning zero hash slots and serving no
+  traffic.
+
+  \item \textbf{Scale-in.} The HPA is removed and the StatefulSet is scaled down one
+  pod at a time. StatefulSets terminate pods in reverse-ordinal order, from
+  $\{N{-}1 \ldots 0\}$~\cite{k8s:statefulset}, so the three replicas
+  (\texttt{redis-5,4,3}) are deleted first; native cluster failover preserves every
+  slot and no data is lost. The subsequent deletion removes a master
+  (\texttt{redis-2}) whose replica is already gone. With no drain, no reshard, and no
+  surviving replica to promote, that master's slots are orphaned and cluster-wide
+  coverage falls below $16{,}384$.
+\end{enumerate}
+
+\paragraph{Hypothesis.} The HPA will provision capacity it structurally cannot
+integrate on scale-out: ghost pods accumulate while throughput and latency fail to
+recover, because the three original masters stay saturated. On scale-in it will
+inflict irreversible data loss once redundancy is exhausted---the reverse-ordinal
+\emph{data cliff}, observable as \texttt{cluster\_state:fail} and a step decrease in
+total keys. Crucially, the replicas will \emph{delay} but not \emph{prevent} the
+cliff, demonstrating that failover (protection against unplanned node death) is no
+substitute for the slot migration a planned scale-in requires.
+
+\subsection{Scenario B: Operator and KEDA on an Operator-Managed Redis Cluster}\label{subsec:flow-operator}
+
+\begin{enumerate}
+  \item \textbf{Provisioning.} The Opstree Redis Operator---a custom controller and
+  \texttt{RedisCluster} custom resource that encode Redis-specific domain knowledge
+  into a Kubernetes reconciliation loop~\cite{k8s:operator,opstree:redisoperator}---is
+  given a desired \texttt{clusterSize}. It declaratively creates the leader and
+  follower StatefulSets and forms the cluster itself, issuing \texttt{CLUSTER MEET}
+  and assigning slots, with no manual \texttt{redis-cli} step.
+
+  \item \textbf{Autoscaler.} A KEDA \texttt{ScaledObject} watches a Prometheus
+  cache-miss-ratio metric and actuates the operator's \texttt{clusterSize} through a
+  managed HPA bound to the custom resource's \texttt{/scale}
+  subresource~\cite{keda:home}.
+
+  \item \textbf{Scale-out.} When the metric crosses its threshold, KEDA raises
+  \texttt{clusterSize}; the operator adds a master \emph{and} performs a
+  topology-aware reshard, migrating a balanced slot range onto the new node so that
+  the added capacity actually relieves load~\cite{redis:scaling}.
+
+  \item \textbf{Scale-in.} For reproducibility the cluster is first reset to a
+  settled three-master baseline, then transitioned a single master at a time
+  ($3\rightarrow4\rightarrow3$) via KEDA's \texttt{paused-replicas} annotation. On
+  removal the operator drains the departing master---migrating its slots to the
+  survivors---before deleting the pod. A documented limitation is captured: the
+  operator has no self-healing for an interrupted reshard, which leaves a slot in the
+  \texttt{importing}/\texttt{migrating} (``open'') state~\cite{redis:clusterspec} that
+  must be repaired manually with \texttt{redis-cli -{}-cluster fix}.
+\end{enumerate}
+
+\paragraph{Hypothesis.} The operator will integrate each new master on scale-out
+(full slot ownership and recovering throughput) and will drain gracefully on
+scale-in, holding continuous $16{,}384$-slot coverage with zero data loss. This
+safety is expected to come at the cost of substantially more provisioning machinery
+than the HPA path and a residual need for manual intervention when a reshard is
+interrupted---supporting the thesis that the operator is \emph{necessary but not, on
+its own, sufficient} for fully hands-off elastic operation.
+
+\subsection{The Necessity of Quiescing the Load Generator Before Scale-In}\label{subsec:quiescing}
+
+Resharding is performed live and depends on clients following \texttt{ASK} and
+\texttt{MOVED} redirections while a slot is held in the
+\texttt{importing}/\texttt{migrating} state~\cite{redis:clusterspec,redis:scaling}.
+Under the write-heavy workload, a continuous stream of writes addressed to a slot
+that is mid-migration is the dominant cause of an interrupted migration, leaving an
+``open'' slot that the operator cannot repair on its own. Performing the controlled
+scale-in while the generator is still firing therefore introduces a confound: an
+interruption attributable to write pressure would be indistinguishable from a
+deficiency of the scaling mechanism itself.
+
+Because this study is scoped to the ghost-pod phenomenon and the operator's
+resharding \emph{capability}---not its robustness under adversarial write load---the
+controlled scale-in is conducted under quiescent conditions. The \texttt{k6}
+generator is terminated and the procedure continues only once the request rate, and
+the corresponding Redis command rate, have fallen to zero. This is a deliberate
+experimental control rather than a concession for three reasons. First, it isolates
+resharding correctness from a known confounding stressor. Second, it remains fair to
+both scenarios, as the HPA data cliff is structural and manifests even at zero load,
+so quiescing cannot conceal it. Third, it preserves measurability: the workload
+configures no key expiration or eviction, so populated keys persist for post-hoc
+accounting of any loss. The load-induced interruption is not discarded but reported
+separately as a finding of the scale-out experiments.
+
+\paragraph{Hypothesis.} Quiescing the generator before the scale-in will sharply
+reduce the probability of an interrupted reshard, yielding a reproducible graceful
+drain for the operator while leaving the HPA cliff unchanged. This isolates write
+load---rather than the scaling mechanism alone---as the governing factor in reshard
+interruption, and so permits a balanced comparison of operational complexity between
+the two approaches.
