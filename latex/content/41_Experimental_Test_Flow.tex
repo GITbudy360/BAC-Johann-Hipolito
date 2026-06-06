@@ -13,15 +13,15 @@ procedure so that the scaling mechanism is the sole independent variable:
 (5)~quiesce the workload and perform a controlled scale-in; and
 (6)~capture the resulting topology and key-space metrics in Grafana.
 The workload, resource requests, monitoring stack, and autoscaler \texttt{behavior}
-parameters are held constant; only the resharding intelligence differs.
+parameters are held constant; only the resharding intelligence differs. Bash scripts help to automate most ofthe procedure. For more details on the Bash scripts, please see the accompanying repository.
 
 A Redis Cluster partitions its key space into $16{,}384$ hash slots distributed
 across master nodes, so adding or removing a master requires \emph{resharding}---the
 live migration of slots between nodes---rather than the mere addition of a pod
-\cite{redis:clusterspec,redis:scaling}. The central question of the test flow is
+(\cite{redis:clusterspec,redis:scaling}). The central question of the test flow is
 whether each mechanism can perform this slot-level work, because Kubernetes' native
 workload primitives manage pod \emph{count} but possess no knowledge of cluster
-\emph{topology}~\cite{k8s:operator}.
+\emph{topology}~(\cite{k8s:operator}).
 
 \subsection{Scenario A: Native HPA on a Self-Managed Redis Cluster}\label{subsec:flow-hpa}
 
@@ -32,11 +32,11 @@ workload primitives manage pod \emph{count} but possess no knowledge of cluster
   (\texttt{redis-0..2}) each with one replica (\texttt{redis-3..5}). Because a
   StatefulSet manifest cannot express the master--replica relationship, this role
   assignment is necessarily a runtime operation external to the declarative
-  configuration~\cite{k8s:statefulset,redis:clusterspec}.
+  configuration~(\cite{k8s:statefulset,redis:clusterspec}).
 
   \item \textbf{Autoscaler.} An HPA targets the StatefulSet with a $40\%$ average
   CPU-utilisation goal; per-pod CPU requests are declared so the controller can
-  compute utilisation~\cite{k8s:hpa}. \texttt{minReplicas} is pinned to the six-pod
+  compute utilisation~(\cite{k8s:hpa}). \texttt{minReplicas} is pinned to the six-pod
   baseline so the idle controller cannot scale down and strip the replicas before
   the run.
 
@@ -51,7 +51,7 @@ workload primitives manage pod \emph{count} but possess no knowledge of cluster
 
   \item \textbf{Scale-in.} The HPA is removed and the StatefulSet is scaled down one
   pod at a time. StatefulSets terminate pods in reverse-ordinal order, from
-  $\{N{-}1 \ldots 0\}$~\cite{k8s:statefulset}, so the three replicas
+  $\{N{-}1 \ldots 0\}$~(\cite{k8s:statefulset}), so the three replicas
   (\texttt{redis-5,4,3}) are deleted first; native cluster failover preserves every
   slot and no data is lost. The subsequent deletion removes a master
   (\texttt{redis-2}) whose replica is already gone. With no drain, no reshard, and no
@@ -73,7 +73,7 @@ substitute for the slot migration a planned scale-in requires.
 \begin{enumerate}
   \item \textbf{Provisioning.} The Opstree Redis Operator---a custom controller and
   \texttt{RedisCluster} custom resource that encode Redis-specific domain knowledge
-  into a Kubernetes reconciliation loop~\cite{k8s:operator,opstree:redisoperator}---is
+  into a Kubernetes reconciliation loop~(\cite{k8s:operator,opstree:redisoperator})---is
   given a desired \texttt{clusterSize}. It declaratively creates the leader and
   follower StatefulSets and forms the cluster itself, issuing \texttt{CLUSTER MEET}
   and assigning slots, with no manual \texttt{redis-cli} step.
@@ -81,12 +81,12 @@ substitute for the slot migration a planned scale-in requires.
   \item \textbf{Autoscaler.} A KEDA \texttt{ScaledObject} watches a Prometheus
   cache-miss-ratio metric and actuates the operator's \texttt{clusterSize} through a
   managed HPA bound to the custom resource's \texttt{/scale}
-  subresource~\cite{keda:home}.
+  subresource~(\cite{keda:home}).
 
   \item \textbf{Scale-out.} When the metric crosses its threshold, KEDA raises
   \texttt{clusterSize}; the operator adds a master \emph{and} performs a
   topology-aware reshard, migrating a balanced slot range onto the new node so that
-  the added capacity actually relieves load~\cite{redis:scaling}.
+  the added capacity actually relieves load~(\cite{redis:scaling}).
 
   \item \textbf{Scale-in.} For reproducibility the cluster is first reset to a
   settled three-master baseline, then transitioned a single master at a time
@@ -94,7 +94,7 @@ substitute for the slot migration a planned scale-in requires.
   removal the operator drains the departing master---migrating its slots to the
   survivors---before deleting the pod. A documented limitation is captured: the
   operator has no self-healing for an interrupted reshard, which leaves a slot in the
-  \texttt{importing}/\texttt{migrating} (``open'') state~\cite{redis:clusterspec} that
+  \texttt{importing}/\texttt{migrating} (``open'') state~(\cite{redis:clusterspec}) that
   must be repaired manually with \texttt{redis-cli -{}-cluster fix}.
 \end{enumerate}
 
@@ -110,7 +110,7 @@ its own, sufficient} for fully hands-off elastic operation.
 
 Resharding is performed live and depends on clients following \texttt{ASK} and
 \texttt{MOVED} redirections while a slot is held in the
-\texttt{importing}/\texttt{migrating} state~\cite{redis:clusterspec,redis:scaling}.
+\texttt{importing}/\texttt{migrating} state~(\cite{redis:clusterspec,redis:scaling}).
 Under the write-heavy workload, a continuous stream of writes addressed to a slot
 that is mid-migration is the dominant cause of an interrupted migration, leaving an
 ``open'' slot that the operator cannot repair on its own. Performing the controlled

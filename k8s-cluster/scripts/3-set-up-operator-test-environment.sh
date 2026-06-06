@@ -209,18 +209,56 @@ set +e
 # (redis-cli then refuses every reshard with "Please fix your cluster problems"); we never
 # auto-repair, so if this never settles, that wedge IS the finding.
 wait_settled() {
-    local want="$1" tries="${2:-120}" chk leaders   # default ~10 min at 5s/iteration
+    local want="$1" tries="${2:-120}" chk masters   # default ~10 min at 5s/iteration
     for _ in $(seq 1 "$tries"); do
-        leaders=$(k3s kubectl get statefulset redis-cluster-leader -n redis -o jsonpath='{.status.readyReplicas}' 2>/dev/null)
         chk=$(k3s kubectl exec redis-cluster-leader-0 -n redis -- redis-cli --cluster check 127.0.0.1:6379 2>/dev/null)
-        if [[ "$leaders" == "$want" ]] \
+        # Count REAL Redis masters from the check summary ("[OK] N keys in M masters."), NOT k8s
+        # readyReplicas - a pod can be Ready but not yet MEET'd/resharded into the cluster.
+        masters=$(echo "$chk" | grep -oE '[0-9]+ masters' | grep -oE '^[0-9]+' | head -1)
+        if [[ "$masters" == "$want" ]] \
            && echo "$chk" | grep -q "All 16384 slots covered" \
+           && echo "$chk" | grep -q "All nodes agree about slots configuration" \
            && ! echo "$chk" | grep -q "are open"; then
             return 0
         fi
         sleep 5
     done
     return 1
+}
+
+# Human-in-the-loop settle gate. Drives the cluster to a CLEAN state at <want> Redis masters
+# (all 16384 slots covered, none open, AND all nodes agreeing) and HARD-STOPS until it is
+# reached - never plowing ahead onto an unsettled cluster, which is what compounds churn into a
+# configEpoch split. The operator has NO self-healing, so on a wedge it surfaces the SPECIFIC
+# variant and the MATCHING manual recovery, then loops until a human has cleared it:
+#   * open slot (migrating/importing)            -> redis-cli --cluster fix
+#   * "Nodes don't agree about configuration!"   -> CLUSTER BUMPEPOCH ('--cluster fix' CANNOT fix this; it exits 1)
+gate_settled() {
+    local want="$1" chk
+    if wait_settled "$want"; then return 0; fi
+    while true; do
+        chk=$(k3s kubectl exec redis-cluster-leader-0 -n redis -- redis-cli --cluster check 127.0.0.1:6379 2>/dev/null)
+        echo -e "\n${RED}>>> ACTION REQUIRED: operator wedged, cannot self-heal (need ${want} settled masters) <<<${NC}"
+        if echo "$chk" | grep -q "are open"; then
+            echo -e "An interrupted reshard left an OPEN slot. OPEN A NEW TERMINAL and run:"
+            echo -e "   ${YELLOW}k3s kubectl exec -it redis-cluster-leader-0 -n redis -- redis-cli --cluster fix 127.0.0.1:6379${NC}"
+        elif echo "$chk" | grep -q "Nodes don't agree"; then
+            echo -e "Masters DISAGREE about the slot map (a configEpoch collision). '--cluster fix' CANNOT"
+            echo -e "repair this and exits 1. OPEN A NEW TERMINAL, list the nodes and their config-epochs:"
+            echo -e "   ${YELLOW}k3s kubectl exec -it redis-cluster-leader-0 -n redis -- redis-cli cluster nodes${NC}"
+            echo -e "find two masters sharing an epoch, then bump the newer/importing one so one claim wins:"
+            echo -e "   ${YELLOW}k3s kubectl exec -it redis-cluster-leader-0 -n redis -- redis-cli -h <MASTER_IP> -p 6379 cluster bumpepoch${NC}"
+        else
+            echo -e "Cluster not settled at ${want} masters yet. Inspect:"
+            echo -e "   ${YELLOW}k3s kubectl exec -it redis-cluster-leader-0 -n redis -- redis-cli --cluster check 127.0.0.1:6379${NC}"
+        fi
+        read -p "Press [Enter] AFTER recovering it in the OTHER terminal..."
+        if wait_settled "$want" 12; then   # quick ~60s re-check
+            echo -e "${GREEN}Cluster settled at ${want} masters - continuing.${NC}"
+            return 0
+        fi
+        echo -e "${RED}Still not settled - repeating the guidance.${NC}"
+    done
 }
 
 # Quiesce BEFORE any resharding below. Live writes landing on slots that are mid-migration are
@@ -234,15 +272,19 @@ echo -e "(watch it flatline in Grafana - ideally confirm the redis write-command
 echo -e "Resharding under live writes is what interrupts the operator; quiescing avoids the wedge."
 read -p "Press [Enter] once k6 is stopped and traffic has drained to 0..."
 
-# 6a. RESET to a settled 3-master baseline (undo any metric-driven scale-out from step 4).
+# 6a-pre. Best-effort: let any in-flight load-driven reshard from step 4 FINISH before we touch
+# clusterSize. Pinning to 3 ON TOP of an in-flight reshard is exactly what produced the
+# configEpoch split ("Nodes don't agree about configuration!") in earlier runs. Not human-gated
+# here: if it can't settle we reset anyway, and the HARD gate on 3 (below) catches any wedge.
+cur_leaders=$(k3s kubectl get statefulset redis-cluster-leader -n redis -o jsonpath='{.status.readyReplicas}' 2>/dev/null)
+echo -e "${YELLOW}[settle] Letting the load-driven scale-out finish at its current ${cur_leaders:-?} master(s) before resetting...${NC}"
+wait_settled "${cur_leaders:-3}" 60 || echo -e "${YELLOW}  (incoming state did not fully settle; resetting to 3 anyway)${NC}"
+
+# 6a. RESET to a settled 3-master baseline (single step), then HARD-gate on it.
 echo -e "${YELLOW}[reset] Pinning to a settled 3-master baseline before the controlled scale-in...${NC}"
 k3s kubectl annotate scaledobject redis-keda-scaler -n redis autoscaling.keda.sh/paused-replicas="3" --overwrite
-if wait_settled 3; then
-    echo -e "${GREEN}Baseline reached: 3 masters, all 16384 slots covered, none open.${NC}\n"
-else
-    echo -e "${RED}Could not reach a clean 3-master baseline (open slot or stuck drain). The cluster${NC}"
-    echo -e "${RED}came into this step churned; recover with --cluster fix before trusting the run below.${NC}\n"
-fi
+gate_settled 3
+echo -e "${GREEN}Baseline reached: 3 masters, all 16384 slots covered, all nodes agree.${NC}\n"
 
 # 6b. SINGLE-STEP scale-OUT 3 -> 4 (creates leader-3, the master we will then drain).
 echo -e "${YELLOW}Pinning to 4 (operator adds leader-3 and RESHARDS slots onto it)...${NC}"
@@ -253,11 +295,9 @@ for _ in $(seq 1 150); do
 done
 k3s kubectl rollout status statefulset redis-cluster-leader -n redis --timeout=600s
 
-echo -e "Waiting for the scale-out reshard to settle (4 masters, all slots covered, none open)..."
-if ! wait_settled 4; then
-    echo -e "${RED}Reshard did not settle (an open slot remains). The operator cannot self-heal this;${NC}"
-    echo -e "${RED}the scale-in below will wedge - that is the documented finding.${NC}"
-fi
+echo -e "Waiting for the scale-out reshard to settle (4 masters, all slots covered, all agree)..."
+gate_settled 4
+echo -e "${GREEN}Scale-out settled: leader-3 integrated, all 16384 slots covered, all nodes agree.${NC}"
 
 echo -e "\n${BLUE}--- BEFORE scale-in: 4 masters, all 16384 slots covered ---${NC}"
 k3s kubectl exec redis-cluster-leader-0 -n redis -- redis-cli cluster info | grep -E 'cluster_state|cluster_slots_assigned|cluster_slots_ok'
@@ -275,36 +315,14 @@ k3s kubectl annotate scaledobject redis-keda-scaler -n redis autoscaling.keda.sh
 # wedges, the human must OPEN A NEW TERMINAL and manually trigger `redis-cli --cluster fix`. That
 # manual toil is precisely the operational cost the thesis is documenting, so we make it an
 # explicit, required, verified step rather than hiding it behind an automated fix.
-echo -e "Giving the operator time to drain and remove leader-3 on its own..."
-for _ in $(seq 1 36); do   # ~3 min grace for a clean (uninterrupted) drain
-    k3s kubectl get pod redis-cluster-leader-3 -n redis >/dev/null 2>&1 || break
-    sleep 5
-done
-
-# Wedge signature: leader-3 still present AND an open slot remains => the operator is stuck and
-# only a human can recover it.
-if k3s kubectl get pod redis-cluster-leader-3 -n redis >/dev/null 2>&1 \
-   && k3s kubectl exec redis-cluster-leader-0 -n redis -- redis-cli --cluster check 127.0.0.1:6379 2>/dev/null | grep -q "are open"; then
-    echo -e "\n${RED}>>> ACTION REQUIRED: THE OPERATOR IS WEDGED (it has NO self-healing) <<<${NC}"
-    echo -e "An interrupted reshard left an OPEN slot the operator cannot repair; it is looping on"
-    echo -e "\"Please fix your cluster problems\" and will never remove leader-3 on its own."
-    echo -e "${RED}A HUMAN OPERATOR must recover it. OPEN A NEW TERMINAL and run:${NC}"
-    echo -e "   ${YELLOW}k3s kubectl exec -it redis-cluster-leader-0 -n redis -- redis-cli --cluster fix 127.0.0.1:6379${NC}"
-    # ENSURE the manual --cluster fix was actually triggered: do not continue until the open slot
-    # is gone, re-prompting if the human hasn't run it (or it didn't take) yet.
-    while true; do
-        read -p "Press [Enter] here AFTER you have run --cluster fix in the OTHER terminal..."
-        if k3s kubectl exec redis-cluster-leader-0 -n redis -- redis-cli --cluster check 127.0.0.1:6379 2>/dev/null | grep -q "are open"; then
-            echo -e "${RED}An open slot is STILL present - the manual fix hasn't cleared it. Run it again, then press [Enter].${NC}"
-        else
-            echo -e "${GREEN}Open slot cleared by the manual --cluster fix - the operator can now finish the scale-in.${NC}"
-            break
-        fi
-    done
-fi
-
-# After a clean drain (happy path) OR the human's manual --cluster fix, the operator removes leader-3.
-k3s kubectl wait --for=delete pod/redis-cluster-leader-3 -n redis --timeout=600s
+# The operator should drain leader-3 (migrate its slots to survivors) then remove it, leaving a
+# clean 3-master cluster. CRITICAL FINDING: it has NO self-healing - if the drain reshard is
+# interrupted it wedges (an open slot, OR a configEpoch "nodes don't agree" split) and never
+# removes leader-3. gate_settled waits for the clean 3-master end state and, on a wedge, HARD-
+# STOPS with the matching MANUAL recovery (--cluster fix for an open slot, CLUSTER BUMPEPOCH for
+# a disagreement) until a human clears it. That manual toil is the operational cost the thesis documents.
+echo -e "Waiting for the operator to drain and remove leader-3 (clean 3-master end state)..."
+gate_settled 3
 
 # 6d. HONEST after-check: only claim "no cliff" if the cluster is genuinely whole. Read the
 #     real numbers and compare - never assert zero data loss we did not verify.
