@@ -163,8 +163,10 @@ echo -e "${GREEN}KEDA is active and monitoring.${NC}\n"
 #    so added capacity actually relieves load.
 echo -e "${RED}>>> ACTION REQUIRED: START THE SCALE-OUT LOAD TEST <<<${NC}"
 echo -e "1. In a new terminal on the load generator, run k6 (fans out across all 6"
-echo -e "   NodePorts automatically):"
-echo -e "   ${YELLOW}k6 run -o experimental-prometheus-rw load-test.js${NC}"
+echo -e "   NodePorts automatically) at a LOW rate for this scenario:"
+echo -e "   ${YELLOW}STEADY_RATE=200 k6 run -o experimental-prometheus-rw load-test.js${NC}"
+echo -e "   (KEDA fires on the cache-miss RATIO, which is rate-independent, so a low rate still"
+echo -e "    crosses the 0.05 threshold while cutting the write pressure that wedges the reshard.)"
 echo -e "2. The workload pushes the cache-miss ratio past KEDA's threshold. The script"
 echo -e "   will automatically detect the scale-out to at least 4 masters and capture evidence."
 echo -e "3. THE CONTRAST WITH PHASE 1: the new pod is a real cluster member - it owns"
@@ -274,16 +276,36 @@ gate_settled() {
     done
 }
 
-# Quiesce BEFORE any resharding below. Live writes landing on slots that are mid-migration are
-# the dominant cause of an INTERRUPTED reshard (the open-slot wedge), and BOTH the reset (6a)
-# and the scale-out (6b) below reshard. Stopping k6 first is the single most effective way to
-# get a reproducible, graceful scale-in. Data loss stays fully measurable with no traffic
-# (keys have no TTL), so quiescing costs us nothing for the data-safety result.
-echo -e "\n${RED}>>> STOP k6 NOW <<<${NC}"
-echo -e "Terminate the k6 load test and wait for the request rate to fall to 0 before continuing"
-echo -e "(watch it flatline in Grafana - ideally confirm the redis write-command rate is ~0 too)."
-echo -e "Resharding under live writes is what interrupts the operator; quiescing avoids the wedge."
-read -p "Press [Enter] once k6 is stopped and traffic has drained to 0..."
+# Quiesce DETERMINISTICALLY before any resharding below. Live writes landing on slots that are
+# mid-migration are the dominant cause of an interrupted reshard, so we must GUARANTEE zero
+# workload traffic - not merely ask a human to stop k6. The FastAPI entrypoint is Redis's ONLY
+# client, so scaling it to 0 makes it physically impossible for any request (k6 or stray) to
+# reach Redis, and it also stops the readiness-probe PINGs. We then VERIFY the data tier is
+# actually idle before touching clusterSize. Data loss stays fully measurable with no traffic
+# (keys have no TTL), so this costs us nothing for the data-safety result.
+echo -e "\n${YELLOW}[quiesce] Cutting ALL workload traffic to Redis (scaling the entrypoint to 0)...${NC}"
+echo -e "(You may also stop the k6 run now; the entrypoint scale-down is the hard guarantee.)"
+k3s kubectl scale deployment fastapi-entrypoint -n default --replicas=0
+k3s kubectl wait --for=delete pod -l app=entrypoint -n default --timeout=120s
+
+# Confirm idle from Redis itself (real-time, no Prometheus scrape lag): every master must report
+# instantaneous_ops_per_sec at the exporter/gossip baseline (<=1) before we proceed to reshard.
+echo -e "${YELLOW}[quiesce] Waiting for every master to report ~0 ops/sec...${NC}"
+busy=1
+for _ in $(seq 1 24); do   # up to ~2 min
+    busy=0
+    for ip in $(k3s kubectl get pods -n redis -l app=redis-cluster-leader -o jsonpath='{.items[*].status.podIP}'); do
+        ops=$(k3s kubectl exec redis-cluster-leader-0 -n redis -- redis-cli -h "$ip" -p 6379 INFO stats 2>/dev/null | tr -d '\r' | awk -F: '/instantaneous_ops_per_sec/{print $2+0}')
+        [[ "${ops:-0}" -gt 1 ]] && busy=1
+    done
+    [[ "$busy" -eq 0 ]] && break
+    sleep 5
+done
+if [[ "$busy" -eq 0 ]]; then
+    echo -e "${GREEN}Data tier is idle - safe to reshard.${NC}\n"
+else
+    echo -e "${RED}A master still shows traffic after the entrypoint was removed - investigate before continuing.${NC}\n"
+fi
 
 # 6a-pre. Best-effort: let any in-flight load-driven reshard from step 4 FINISH before we touch
 # clusterSize. Pinning to 3 ON TOP of an in-flight reshard is exactly what produced the
@@ -291,12 +313,12 @@ read -p "Press [Enter] once k6 is stopped and traffic has drained to 0..."
 cur_leaders=$(k3s kubectl get statefulset redis-cluster-leader -n redis -o jsonpath='{.status.readyReplicas}' 2>/dev/null)
 echo -e "${YELLOW}[settle] Letting the load-driven scale-out finish at its current ${cur_leaders:-?} master(s) before resetting...${NC}"
 
-# --- FIX 2: Hard Abort on Unsettled State (Do not force KEDA to scale-in a broken cluster) ---
-if ! wait_settled "${cur_leaders:-3}" 60; then
-    echo -e "${RED}FATAL: Incoming load-driven state did not fully settle (open slots detected).${NC}"
-    echo -e "${RED}Executing a scale-in annotation now would force a data cliff. Aborting test.${NC}"
-    exit 1
-fi
+# Recover (don't abort) the incoming load-driven state. A wedge here is the EXPECTED result of
+# resharding under load in step 4, and it is recoverable - aborting would throw away a run whose
+# data is already populated. gate_settled HARD-STOPS on the wedge with the matching manual
+# recovery (--cluster fix for an open slot, CLUSTER BUMPEPOCH for a disagreement) and only
+# continues once the cluster is genuinely settled, so we still never scale-in a broken cluster.
+gate_settled "${cur_leaders:-3}"
 
 # 6a. RESET to a settled 3-master baseline (single step), then HARD-gate on it.
 echo -e "${YELLOW}[reset] Pinning to a settled 3-master baseline before the controlled scale-in...${NC}"
@@ -349,6 +371,9 @@ else
     echo -e "${RED}That is an operator-side data cliff - report it honestly; do not claim zero data loss.${NC}"
 fi
 k3s kubectl exec redis-cluster-leader-0 -n redis -- redis-cli --cluster check 127.0.0.1:6379
+
+# Restore the entrypoint we scaled to 0 for the quiescent scale-in, so the cluster is left serving.
+k3s kubectl scale deployment fastapi-entrypoint -n default --replicas=6
 
 # Resume metric-driven autoscaling.
 k3s kubectl annotate scaledobject redis-keda-scaler -n redis autoscaling.keda.sh/paused-replicas-
