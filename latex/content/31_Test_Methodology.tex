@@ -1,0 +1,28 @@
+\section{Test Methodology}
+
+To rigorously evaluate the architectural limitations of native Kubernetes scaling primitives against an Operator-driven approach, this thesis adopts an empirical, A/B comparative methodology. The experiment isolates the scaling behaviors of a sharded database by comparing a pure Horizontal Pod Autoscaler (HPA) solution with the Opstree Redis Operator paired with KEDA (\cite{opstree_redis}; \cite{keda_docs}). 
+
+\subsection{Definition of Success}
+A foundational aspect of this methodology is establishing a rigorous metric for what constitutes a successful scaling event. In a stateful context, capacity provisioning alone is insufficient. Therefore, success is defined not just by adding a pod, but by maintaining \texttt{cluster\_state:ok}, ensuring all 16,384 hash slots are covered, and showing an even distribution of slots to the newly added pod without a drop in \texttt{sum(redis\_db\_keys)} (\cite{redis_cluster_spec}). 
+
+\subsection{A/B Comparative Structure}
+The methodology relies on an A/B comparative analysis designed to eliminate confounding variables (\cite{k8s_statefulsets}). 
+\begin{itemize}
+    \item Both the baseline HPA scenario and the Operator scenario operate on the identical underlying infrastructure (a bare-metal K3s cluster distributed across mini-PCs).
+    \item Both scenarios are subjected to the exact same external stimulus: an automated load test utilizing \texttt{k6} to drive traffic evenly across NodePorts.
+    \item Outcomes are evaluated using a unified monitoring stack (Prometheus and Grafana), measuring cache-miss ratios, CPU utilization, total cluster slots assigned, and the integrity of total stored keys.
+\end{itemize}
+
+\subsection{High Reproducibility}
+Reproducibility is enforced through strict pipeline hygiene. As detailed in the test pipeline definition (\ref{sec:test-flow}), every test iteration begins with a "scorched earth" initialization phase. The setup scripts programmatically purge existing namespaces, persistent volumes, and custom resources. This approach guarantees that each scenario runs from a clean state, preventing leftover configuration or ghost pods from prior executions from contaminating the dataset.
+
+\subsection{Empirical Objectivity}
+A core objective of this methodology is to avoid artificially favoring the proposed Operator solution. While the test flow demonstrates the HPA's fundamental inadequacy for topology-aware scaling---specifically exposing the `Ghost Pod' phenomenon during scale-out and the data cliff caused by reverse-ordinal deletion during scale-in---it applies the same critical lens to the Operator. 
+
+The test pipeline (refer to \ref{sec:test-flow}) intentionally does not obscure the Operator's weaknesses. Instead, it systematically probes its fault lines, such as its lack of self-healing capabilities when resharding is interrupted under live writes (\cite{redis_admin}). By documenting the specific operational costs, such as the manual toil required to resolve "open slots" and configEpoch collisions via \texttt{redis-cli --cluster fix}, the methodology ensures an objective evaluation of the Operator's viability rather than an uncritical endorsement.
+
+\subsection{Test Pipeline Integration}
+The methodology is directly realized by the architecture outlined in \ref{sec:test-flow}. The pipeline's structure forces explicit, single-step state transitions during scale-in (e.g., manually scaling replicas from 6 down to 2 in the HPA scenario, and pinning replicas using KEDA annotations in the Operator scenario). This controlled gating is required to observe the exact threshold of failure, isolating the mechanical differences between Kubernetes ordinal scaling and the Operator's topology-aware drain. By pausing execution to surface raw cluster telemetry at each critical state transition, the test flow captures the precise moment of failure or success.
+
+\vspace{2em}
+

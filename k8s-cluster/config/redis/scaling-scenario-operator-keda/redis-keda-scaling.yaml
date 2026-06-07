@@ -49,8 +49,19 @@ spec:
         # Cache-miss ratio. The realized ratio under load is ~0.10 (writes populate the warm
         # boards, so most warm reads hit), so the original 0.15 never fired. 0.05 sits safely
         # below the measured ~0.10, so scale-out actually triggers.
+        # HARDENED for autonomous scale-IN: at zero traffic the raw ratio is 0/0 = NaN, which KEDA
+        # treats as a metric error - after failureThreshold it applies the fallback (replicas: 4)
+        # and an idle cluster never returns to minReplicaCount. clamp_min keeps the denominator
+        # >= 1 (so idle yields 0, not NaN) and `or vector(0)` covers the case where the series is
+        # absent entirely, so the query always yields a finite value and an idle cluster scales to 3.
         query: |
-          sum(rate(redis_keyspace_misses_total{namespace="redis"}[1m]))
-          /
-          (sum(rate(redis_keyspace_hits_total{namespace="redis"}[1m])) + sum(rate(redis_keyspace_misses_total{namespace="redis"}[1m])))
+          (
+            sum(rate(redis_keyspace_misses_total{namespace="redis"}[1m]))
+            /
+            clamp_min(
+              sum(rate(redis_keyspace_hits_total{namespace="redis"}[1m]))
+              + sum(rate(redis_keyspace_misses_total{namespace="redis"}[1m])),
+              1
+            )
+          ) or vector(0)
         threshold: "0.05"
