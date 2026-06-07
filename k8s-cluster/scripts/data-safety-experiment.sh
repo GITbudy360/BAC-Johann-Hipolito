@@ -37,8 +37,12 @@ echo -e "${BLUE}=== Data-Safety Experiment: ${SCENARIO} (${START_MASTERS} -> ${E
 # --- helper: read authoritative cluster state from leader-0 -> SNAP_STATE/SNAP_SLOTS/SNAP_KEYS
 snapshot() {
     local info chk
-    info=$(k3s kubectl exec "$LEAD" -n redis -- redis-cli cluster info 2>/dev/null | tr -d '\r')
-    chk=$(k3s kubectl exec "$LEAD" -n redis -- redis-cli --cluster check 127.0.0.1:6379 2>/dev/null)
+    # NOTE: `redis-cli --cluster check` returns EXIT 1 on ANY warning (open slots, a not-yet-formed
+    # cluster, nodes still joining). Under `set -e` a bare `chk=$(...)` would abort the whole script
+    # mid-formation (silently, since stderr is /dev/null). Guard both with `|| true` - we only want
+    # their stdout here, the health is judged from cluster_state/slots below.
+    info=$(k3s kubectl exec "$LEAD" -n redis -- redis-cli cluster info 2>/dev/null | tr -d '\r') || true
+    chk=$(k3s kubectl exec "$LEAD" -n redis -- redis-cli --cluster check 127.0.0.1:6379 2>/dev/null) || true
     SNAP_STATE=$(echo "$info" | awk -F: '/^cluster_state:/{print $2}')
     SNAP_SLOTS=$(echo "$info" | awk -F: '/^cluster_slots_ok:/{print $2}')
     SNAP_KEYS=$(echo "$chk" | grep -oE '[0-9]+ keys in' | grep -oE '^[0-9]+' | head -1)
@@ -95,7 +99,13 @@ for _ in $(seq 1 60); do
     [[ "$SNAP_STATE" == "ok" && "$SNAP_SLOTS" == "16384" ]] && break
     sleep 5
 done
-echo -e "${GREEN}Cluster online: state=${SNAP_STATE} slots_ok=${SNAP_SLOTS}.${NC}\n"
+if [[ "$SNAP_STATE" == "ok" && "$SNAP_SLOTS" == "16384" ]]; then
+    echo -e "${GREEN}Cluster online: state=${SNAP_STATE} slots_ok=${SNAP_SLOTS}.${NC}\n"
+else
+    echo -e "${RED}Cluster did NOT reach a healthy 16384-slot state in time (state=${SNAP_STATE:-?} slots_ok=${SNAP_SLOTS:-?}).${NC}"
+    echo -e "${RED}Refusing to populate a half-formed cluster. Inspect: k3s kubectl get rediscluster,pods -n redis${NC}"
+    exit 1
+fi
 
 # 3. Populate a known, exact dataset (deterministic; spread across all slots, no hash tags).
 echo -e "${YELLOW}[3/5] Populating ${KEYS} keys via redis-cli (quiescent - this is the only writer)...${NC}"
