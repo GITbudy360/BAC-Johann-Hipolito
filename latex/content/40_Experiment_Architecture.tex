@@ -1,271 +1,35 @@
 \newpage
-\section{Experiment Architecture}
-\label{sec:architecture}
-
-This section describes the architecture of the experimental testbed: the physical
-and logical placement of every component, how they are wired together, and the path
-a synthetic request and its derived metrics take through the system. The two scaling
-strategies under investigation---the native Horizontal Pod Autoscaler (HPA) acting on
-a self-managed cluster, and the Opstree Redis Operator driven by Kubernetes
-Event-Driven Autoscaling (KEDA)---are deployed as mutually exclusive, interchangeable
-modules in an otherwise identical pipeline, so that any measured difference can be
-attributed solely to the scaling mechanism. The procedure that exercises this
-architecture, together with the associated hypotheses, is presented separately in
-Section~\ref{sec:test-flow}; the conceptual description of each individual technology
-is given in Section~\ref{sec:technologies}.
-
-Figure~\ref{fig:architecture-overview} gives a high-level overview. A clear boundary
-separates the single component that lives \emph{outside} the Kubernetes cluster---the
-load generator on an intermediary virtual machine---from everything deployed
-\emph{inside} the six-node cluster. The remainder of this section follows that
-division: Section~\ref{subsec:outside-cluster} covers the external load generator, and
-Section~\ref{subsec:inside-cluster} covers the in-cluster components, organised by the
-Kubernetes namespace in which they are deployed.
-
-\begin{figure}[ht]
-    \centering
-    % NOTE: save the attached architecture diagram to this path.
-    \includegraphics[width=1\linewidth]{assets/images/high-level-architecture-overview-graph.jpg}
-    \caption{High-level architecture of the testbed.}
-    \label{fig:architecture-overview}
-\end{figure}
-
 % ============================================================
-\subsection{Components Outside the Cluster}
-\label{subsec:outside-cluster}
+%  SECTION: Experiment Architecture and Test Flow
 % ============================================================
 
-All synthetic load originates from a single intermediary virtual machine
-(\texttt{192.168.1.100}), which is also the host used to access the cluster remotely
-over the Remote Desktop Protocol (RDP). Running the load generator off-cluster serves
-two purposes: it reproduces the realistic condition in which traffic arrives from
-outside the cluster network, and it ensures that the CPU and memory cost of generating
-load does not contend with the workloads being measured on the six mini-PCs.
+\section{Experiment Architecture and Test Flow}
+This chapter details the architecture of the experimental testbed and the procedural flow employed to evaluate the data safety characteristics of stateful scaling mechanisms. To rigorously isolate the fundamental mechanical differences between native Kubernetes scaling and topology-aware operator-driven scaling, the experimental design eschews dynamic, load-driven autoscaling triggers in favor of a quiescent, deterministic proof of concept. By explicitly removing external load generators, application entrypoints, and automated metric evaluations, the experiment eliminates confounding variables---such as network saturation, connection tracking limits, or resharding interruptions caused by live writes---thereby distilling the evaluation entirely down to the preservation of data integrity and cluster availability during a scale-in event.
 
-The generator is Grafana k6, an open-source load-testing tool whose scenarios are
-written in JavaScript (\cite{k6:docs}). The test script (\texttt{load-test.js}) is
-parameterised so that the identical script drives both experimental runs, preserving
-reproducibility. Three design decisions in the script are architecturally relevant:
+\subsection{System Architecture}
+\label{subsec:architecture-system}
 
+The underlying infrastructure consists of a lightweight Kubernetes distribution, \texttt{k3s}, deployed across a physically distributed cluster of six resource-constrained mini-PCs (\cite{k3s:docs}). These hardware constraints model a realistic edge or on-premises environment where efficient resource reclamation is critical. Unlike dynamic scenarios that require external load injection routing through \texttt{NodePort} services, this quiescent architecture operates entirely within the cluster boundaries.
+
+The architecture comprises two mutually exclusive data tier deployments, which represent the primary independent variable of the experiment:
 \begin{itemize}
-    \item \textbf{A long, steady plateau.} The script uses the
-    \texttt{ramping-arrival-rate} executor to ramp to a constant request rate
-    (\texttt{STEADY\_RATE}, default $1000$~req/s) and hold it for a configurable
-    duration (\texttt{PLATEAU\_MINUTES}, default $20$). A sustained plateau is required
-    so that the manual scale-out, settle, and scale-in steps can all be performed while
-    traffic is live. The same rate is used in both scenarios so the workload is a held
-    constant rather than a variable.
-
-    \item \textbf{Round-robin ingress across all six nodes.} Rather than targeting one
-    address, each request is sent to one of the six node IPs
-    (\texttt{192.168.1.101--106}) on the FastAPI \texttt{NodePort} (\texttt{30080}).
-    Concentrating load on a single node saturates that node's connection-tracking
-    table and surfaces as client-side connection timeouts; spreading requests keeps the
-    experiment measuring Redis scaling rather than single-node ingress saturation.
-
-    \item \textbf{A shardable, cache-miss-inducing workload.} The workload models a
-    gaming leaderboard. Keys take the form \texttt{lb:<region>:<mode>:<date>} and are
-    spread across many Redis sorted sets (no hash tags), so that adding or resharding
-    nodes can genuinely relieve load. Traffic is split $80\%$ writes
-    (\texttt{POST /score/}, a sorted-set update) to $20\%$ reads
-    (\texttt{GET /leaderboard/}); a fixed fraction of reads deliberately query
-    non-existent (future-dated) boards to generate key-space misses, which is the signal
-    the KEDA scenario scales on.
+    \item \textbf{Native Primitives (HPA Scenario):} The Redis Cluster is assembled manually using foundational Kubernetes resources. A \texttt{StatefulSet} manages the pod lifecycle, utilizing a headless \texttt{Service} to provide stable network identities for intra-cluster communication (\cite{k8s:statefulset}). Because the declarative \texttt{StatefulSet} manifest cannot express the topological geometry of a Redis Cluster, the hash slots and master-replica assignments must be imperatively configured via the \texttt{redis-cli} binary during initialization (\cite{redis:clusterspec}).
+    \item \textbf{Operator Pattern (KEDA Scenario):} The data tier is deployed declaratively using the Opstree Redis Operator (\cite{opstree:redisoperator}). The operator's custom controller resides within the cluster and continuously watches a \texttt{RedisCluster} Custom Resource, autonomously translating the requested \texttt{clusterSize} parameter into underlying \texttt{StatefulSet} modifications, \texttt{CLUSTER MEET} commands, and coordinated hash slot migrations.
 \end{itemize}
 
-Upon completion k6 emits an end-of-test summary and, throughout the run, pushes its
-time-series metrics directly into the Prometheus remote-write endpoint exposed by the
-observability stack (Section~\ref{subsubsec:ns-monitoring}), so that client-side
-results appear on the same Grafana dashboards as the cluster-side metrics. A
-representative excerpt of the script is shown in Listing~\ref{lst:k6-code}; helper
-functions that synthesise warm and cold board keys are omitted for brevity.
+To provide continuous, objective telemetry during the scaling transitions, a unified observability stack is deployed via the \texttt{kube-prometheus-stack} Helm chart. Prometheus scrapes the cluster-state metrics directly from the \texttt{redis-cli} processes and exporter sidecars, while Grafana visualizes the exact sequence of topological changes, slot allocations, and data retention metrics.
 
-\begin{lstlisting}[caption={Excerpt of the k6 load script (\texttt{load-test.js}).},label={lst:k6-code}]
-import http from 'k6/http';
-import { check } from 'k6';
-import { randomString, randomIntBetween } from 'https://jslib.k6.io/k6-utils/1.2.0/index.js';
+\subsection{Configuration Manifests}
+\label{subsec:architecture-manifests}
 
-// Long, steady plateau; tune via env and keep identical across both scenarios so that the scaling MECHANISM is the only variable.
-const STEADY_RATE = Number(__ENV.STEADY_RATE || 1000);
-const PLATEAU_MINUTES = Number(__ENV.PLATEAU_MINUTES || 20);
+To instantiate the environments described above, the experiment relies on declarative YAML manifests. Listing~\ref{lst:hpa-cluster} details the baseline native Kubernetes configuration, explicitly demonstrating the lack of topological awareness in a standard \texttt{StatefulSet}. Listing~\ref{lst:operator-values} displays the Helm values utilized to configure the Opstree Redis Operator, showcasing the abstraction of cluster sizing and exporter injection.
 
-export const options = {
-  scenarios: {
-    redis_scaling_trigger: {
-      executor: 'ramping-arrival-rate',
-      startRate: 50,
-      timeUnit: '1s',
-      preAllocatedVUs: 50,
-      maxVUs: 300,
-      stages: [
-        { duration: '1m', target: STEADY_RATE },                   // ramp up
-        { duration: `${PLATEAU_MINUTES}m`, target: STEADY_RATE },  // hold the plateau
-        { duration: '30s', target: 0 },                            // ramp down
-      ],
-    },
-  },
-};
-
-// Round-robin across ALL six NodePorts so no single node's conntrack table saturates.
-const API_PORT = __ENV.API_PORT || '30080';
-const DEFAULT_HOSTS = [
-  '192.168.1.101', '192.168.1.102', '192.168.1.103',
-  '192.168.1.104', '192.168.1.105', '192.168.1.106',
-];
-const BASES = DEFAULT_HOSTS.map((h) => `http://${h}:${API_PORT}`);
-function apiBase() { return BASES[Math.floor(Math.random() * BASES.length)]; }
-
-const COLD_READ_FRACTION = 0.25; // reads that miss -> keyspace misses -> drive KEDA
-
-export default function () {
-  const base = apiBase();
-  const isWrite = Math.random() < 0.8;   // 80% writes, 20% reads
-  if (isWrite) {
-    const payload = JSON.stringify({
-      board: warmBoard(), player_id: `player_${randomString(8)}`,
-      score: randomIntBetween(100, 10000),
-    });
-    const res = http.post(`${base}/score/`, payload,
-      { headers: { 'Content-Type': 'application/json' } });
-    check(res, { 'score update status is 200': (r) => r.status === 200 });
-  } else {
-    const board = Math.random() < COLD_READ_FRACTION ? coldBoard() : warmBoard();
-    const res = http.get(`${base}/leaderboard/?board=
-      ${
-            encodeURIComponent(board)
-      }`);
-    check(res, { 'leaderboard fetch status is 200': (r) => r.status === 200 });
-  }
-}
-\end{lstlisting}
-
-The test is launched from the VM with, for example:
-\begin{lstlisting}[language=bash]
-k6 run -o experimental-prometheus-rw -e API_URL="http://192.168.1.101:30080" load-generation-test.js
-\end{lstlisting}
-% ============================================================
-\subsection{Components Inside the Cluster}
-\label{subsec:inside-cluster}
-% ============================================================
-
-The cluster is a k3s distribution running on six mini-PCs (four-core CPU, 8\,GB RAM
-each), one acting as a combined control-plane and worker node and the remaining five as
-workers (\cite{k3s:docs}). k3s is chosen for its small footprint on
-resource-constrained hardware while remaining fully API-conformant. All in-cluster
-components are organised into four Kubernetes namespaces, which also structure the
-subsections below: \texttt{default} (the application entrypoint), \texttt{redis} (the
-stateful data tier and both scaling configurations), \texttt{ot-operators} together
-with \texttt{keda} (the cluster-wide scaling controllers), and \texttt{monitoring} (the
-observability stack). The namespace boundaries and their associated manifests follow
-the project's infrastructure inventory.
-
-% ------------------------------------------------------------
-\subsubsection{The \texttt{default} Namespace: FastAPI Entrypoint}
-\label{subsubsec:ns-default}
-% ------------------------------------------------------------
-
-The \texttt{default} namespace hosts the FastAPI application that is the single ingress
-point for all traffic from k6 (\cite{fastapi:docs}). It is deployed as a
-\texttt{Deployment} of six replicas---one per physical node, so that no single pod
-absorbs all ingress---fronted by a \texttt{NodePort} \texttt{Service} on port
-\texttt{30080}, which is the port the off-cluster load generator targets. The
-application is intentionally written to connect to \emph{either} data-tier topology: its
-\texttt{REDIS\_STARTUP\_NODES} environment variable lists both the HPA scenario's
-headless service (\texttt{redis-headless}) and the operator scenario's leader service
-(\texttt{redis-cluster-leader}), and it binds to whichever currently exists. A
-readiness probe on \texttt{/ready} reports the pod as ready only once its Redis client
-is live, which doubles as a ``cluster reachable'' barrier for the setup scripts. The
-manifest is shown in Listing~\ref{lst:fastapi-deployment}.
-
-\begin{lstlisting}[caption={FastAPI entrypoint \texttt{Deployment} and \texttt{NodePort} \texttt{Service} (\texttt{entrypoint-deployment.yaml}).},label={lst:fastapi-deployment}]
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: fastapi-entrypoint
-  labels: { app: entrypoint }
-spec:
-  replicas: 6                      # one per node; spreads ingress
-  selector:
-    matchLabels: { app: entrypoint }
-  template:
-    metadata:
-      labels: { app: entrypoint }
-    spec:
-      containers:
-      - name: fastapi
-        image: dockbudy360/fastapi-entrypoint:2.5
-        ports:
-        - containerPort: 8000
-        env:
-        # Connects to whichever data-tier service currently exists:
-        #   redis-headless       -> HPA StatefulSet
-        #   redis-cluster-leader -> Opstree RedisCluster
-        - name: REDIS_STARTUP_NODES
-          value:  
-                  "redis-headless.redis.svc.cluster.local:6379,
-                  redis-cluster-leader.redis.svc.
-                  cluster.local:6379"
-        - name: WEB_CONCURRENCY
-          value: "4"
-        readinessProbe:
-          httpGet: { path: /ready, port: 8000 }
-          initialDelaySeconds: 5
-          periodSeconds: 10
-        livenessProbe:
-          httpGet: { path: /healthy, port: 8000 }
-          initialDelaySeconds: 10
-          periodSeconds: 15
-        resources:
-          requests: { cpu: "500m", memory: "256Mi" }
-          limits:   { cpu: "2",    memory: "512Mi" }
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: fastapi-entrypoint-svc
-spec:
-  type: NodePort
-  selector: { app: entrypoint }
-  ports:
-    - protocol: TCP
-      port: 80
-      targetPort: 8000
-      nodePort: 30080
-\end{lstlisting}
-
-% ------------------------------------------------------------
-\subsubsection{The \texttt{redis} Namespace: Stateful Data Tier and Scaling Configurations}
-\label{subsubsec:ns-redis}
-% ------------------------------------------------------------
-
-The \texttt{redis} namespace contains the stateful data tier and the manifests for both
-scaling scenarios. Only one scenario is ever active at a time; the setup scripts scorch
-the namespace between runs. A Redis Cluster partitions its key space into $16{,}384$
-hash slots distributed across master nodes (\cite{redis:clusterspec}), and the two
-scenarios differ precisely in \emph{who} manages those slots when the node count
-changes.
-
-\paragraph{HPA scenario (self-managed cluster).}
-Here the cluster is assembled from native Kubernetes primitives. A \texttt{ConfigMap}
-supplies a minimal \texttt{redis.conf} with \texttt{cluster-enabled yes}; a headless
-\texttt{Service} (\texttt{clusterIP: None}) gives each pod a stable DNS identity; and a
-\texttt{StatefulSet} of six pods runs Redis with an \texttt{oliver006} exporter sidecar
-on port \texttt{9121} (Listing~\ref{lst:redis-statefulset}). The cluster topology---three
-masters, each with one replica---is not expressible in the \texttt{StatefulSet} itself
-and is therefore formed imperatively by the setup script with
-\texttt{redis-cli -{}-cluster create -{}-cluster-replicas 1}. A
-\texttt{HorizontalPodAutoscaler} (Listing~\ref{lst:hpa}) targets the
-\texttt{StatefulSet} on a $40\%$ average CPU goal (\cite{k8s:hpa}); its
-\texttt{minReplicas} is pinned to the six-pod baseline so the idle controller cannot
-remove the replicas, and a \texttt{behavior} block fixes the scale-up and scale-down
-rates so that autoscaler dynamics are held identical to the KEDA scenario. A
-\texttt{ServiceMonitor} (Listing~\ref{lst:servicemonitor-hpa}) wires the exporter into
-Prometheus.
-
-\begin{lstlisting}[caption={Redis \texttt{ConfigMap}, headless \texttt{Service}, and \texttt{StatefulSet} (\texttt{redis-hpa-cluster.yaml}).},label={lst:redis-statefulset}]
+\begin{lstlisting}[caption={Kubernetes manifests for the native HPA Redis scenario (\texttt{redis-hpa-cluster.yaml}).},label={lst:hpa-cluster}]
 apiVersion: v1
 kind: ConfigMap
-metadata: { name: redis-min-config, namespace: redis }
+metadata:
+  name: redis-min-config
+  namespace: redis
 data:
   redis.conf: |
     cluster-enabled yes
@@ -278,270 +42,149 @@ kind: Service
 metadata:
   name: redis-headless
   namespace: redis
-  labels: { app: redis }
+  labels:
+    app: redis
 spec:
-  clusterIP: None                 # headless: per-pod DNS for slot-aware routing
+  clusterIP: None
   ports:
-    - { port: 6379,  name: redis }
-    - { port: 16379, name: gossip }
-    - { port: 9121,  name: metrics }
-  selector: { app: redis }
+    - port: 6379
+      name: redis
+    - port: 16379
+      name: gossip
+    - port: 9121
+      name: metrics
+  selector:
+    app: redis
 ---
 apiVersion: apps/v1
 kind: StatefulSet
-metadata: { name: redis, namespace: redis }
+metadata:
+  name: redis
+  namespace: redis
 spec:
   serviceName: redis-headless
-  replicas: 6                      # 3 masters + 3 replicas; roles assigned at runtime by redis-cli
+  # 6 pods = 3 masters + 3 replicas. The master/replica ROLES are assigned at runtime by the
+  # setup script's `redis-cli --cluster create --cluster-replicas 1` - a vanilla StatefulSet
+  # cannot express "pod X replicates pod Y", which is exactly the topology gap the operator
+  # closes declaratively. The HPA's minReplicas is pinned to 6 (see redis-hpa-scaling.yaml) so
+  # it won't scale the StatefulSet down to 3 while idle and strip the replicas before the test.
+  replicas: 6
   selector:
-    matchLabels: { app: redis }
+    matchLabels:
+      app: redis
   template:
     metadata:
-      labels: { app: redis }
+      labels:
+        app: redis
     spec:
       containers:
         - name: redis
           image: redis:7.2-alpine
           command: ["redis-server", "/etc/redis/redis.conf"]
           resources:
-            requests: { cpu: "100m", memory: "128Mi" }   # required for HPA % calc
+            ## Base requests are strictly required for HPA to calculate usage percentages
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
           volumeMounts:
-            - { name: conf, mountPath: /etc/redis }
+            - name: conf
+              mountPath: /etc/redis
         - name: redis-exporter
           image: ghcr.io/oliver006/redis_exporter:latest
           ports:
-            - { containerPort: 9121, name: metrics }
+          - containerPort: 9121
+            name: metrics
           env:
-            - { name: REDIS_ADDR, value: "redis://localhost:6379" }
-          resources:
-            requests: { cpu: "50m", memory: "64Mi" }
+          # Since it's a sidecar, it can reach the main Redis container via localhost
+          - name: REDIS_ADDR
+            value: "redis://localhost:6379"
+          resources: 
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
       volumes:
         - name: conf
-          configMap: { name: redis-min-config }
+          configMap:
+            name: redis-min-config
 \end{lstlisting}
 
-\begin{lstlisting}[caption={\texttt{HorizontalPodAutoscaler} for the HPA scenario (\texttt{redis-hpa-scaling.yaml}).},label={lst:hpa}]
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata: { name: redis-hpa, namespace: redis }
-spec:
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: StatefulSet
-    name: redis
-  minReplicas: 6                   # = baseline (3 masters + 3 replicas), so replicas are not stripped
-  maxReplicas: 9                   # room for the HPA to add ghost pods
-  metrics:
-    - type: ContainerResource
-      containerResource:
-        name: cpu
-        container: redis           # only the Redis container, not the exporter
-        target:
-          type: Utilization
-          averageUtilization: 40
-  behavior:                        # matched IDENTICALLY on the KEDA ScaledObject
-    scaleDown:
-      stabilizationWindowSeconds: 300
-      policies: [{ type: Pods, value: 1, periodSeconds: 60 }]
-    scaleUp:
-      stabilizationWindowSeconds: 0
-      policies: [{ type: Pods, value: 1, periodSeconds: 180 }]
-\end{lstlisting}
+\begin{lstlisting}[caption={Helm values configuring the Opstree Redis Operator (\texttt{redis-operator-cluster-values.yaml}).},label={lst:operator-values}]
 
-\begin{lstlisting}[caption={\texttt{ServiceMonitor} for the HPA scenario exporter (\texttt{redis-servicemonitor.yaml}).},label={lst:servicemonitor-hpa}]
-apiVersion: monitoring.coreos.com/v1
-kind: ServiceMonitor
-metadata:
-  name: redis-monitor
-  namespace: redis
-  labels: { release: prometheus }  # adopted by kube-prometheus-stack
-spec:
-  selector:
-    matchLabels: { app: redis }
-  endpoints:
-    - { port: metrics, interval: 15s }
-\end{lstlisting}
-
-\paragraph{Operator and KEDA scenario (operator-managed cluster).}
-Here the data tier is declared rather than assembled. The Opstree Redis Operator is
-given a desired \texttt{clusterSize} through its \texttt{RedisCluster} custom resource,
-and the operator creates the leader and follower \texttt{StatefulSet}s, forms the
-cluster, and---crucially---reshards slots when the size changes
-(\cite{k8s:operator}; \cite{opstree:redisoperator}). The resource is deployed via the
-operator's Helm chart, configured by the values file in
-Listing~\ref{lst:operator-values}: \texttt{clusterSize} is $3$, the leader and follower
-replica counts are left unset so that \texttt{clusterSize} alone drives the master
-count, leader anti-affinity spreads masters across nodes, and the same
-\texttt{oliver006} exporter is enabled for metric parity with the HPA scenario. Scaling
-is actuated by a KEDA \texttt{ScaledObject} (Listing~\ref{lst:keda-scaledobject}) that
-reads a Prometheus cache-miss-ratio query and changes \texttt{clusterSize} through a
-managed HPA bound to the resource's \texttt{/scale} subresource (\cite{keda:home}); its
-\texttt{behavior} block mirrors the HPA scenario exactly. As in the HPA scenario, a
-standalone \texttt{ServiceMonitor} (Listing~\ref{lst:servicemonitor-operator}) is
-required, because neither the operator nor the chart flag creates one.
-
-\begin{lstlisting}[caption={Opstree Helm values producing the \texttt{RedisCluster} (\texttt{redis-operator-cluster-values.yaml}).},label={lst:operator-values}]
 redisCluster:
   clusterSize: 3
-  persistenceEnabled: false        # ephemeral, matching the HPA scenario
+  # IMPORTANT: do NOT override this with the vanilla redis image. The Opstree operator
+  # depends on its OWN image's entrypoint (quay.io/opstree/redis) to enable cluster mode
+  # (cluster-enabled yes). A plain redis:7.2-alpine boots in STANDALONE mode, so redis-py
+  # fails with "Cluster mode is not enabled on this node" and the entrypoint never connects.
+  # We therefore use the chart's default Opstree image; the minor version delta vs the HPA
+  # scenario's redis:7.2 is an acceptable, documented trade-off for a working cluster.
   resources:
-    requests: { cpu: "100m", memory: "128Mi" }
-    limits:   { cpu: "250m", memory: "256Mi" }
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "250m"
+      memory: "256Mi"
   leader:
-    replicas: null                 # null => clusterSize drives the master count
+    # Un-pin leader replicas so clusterSize (driven by KEDA) controls the master count.
+    replicas: null
     affinity:
-      podAntiAffinity:             # prefer one master per node
+      podAntiAffinity:
+        # Preferred (not required) so a scale-out to 4-6 masters can't get stuck Pending
+        # if a node is momentarily unschedulable - the scheduler still spreads leaders
+        # one-per-node when it can. weight 100 = strongest preference.
         preferredDuringSchedulingIgnoredDuringExecution:
         - weight: 100
           podAffinityTerm:
             labelSelector:
-              matchLabels: { app: redis-cluster-leader }
+              matchLabels:
+                app: redis-cluster-leader
             topologyKey: kubernetes.io/hostname
+
+  # Same un-pin for followers, so clusterSize drives the whole cluster symmetrically.
   follower:
     replicas: null
+
+# Exporter sidecar: source of redis_keyspace_hits_total / _misses_total that KEDA's
+# cache-miss-ratio trigger reads. Mirrors the oliver006 exporter used in the HPA
+# scenario for identical metric semantics.
 redisExporter:
   enabled: true
   image: ghcr.io/oliver006/redis_exporter
   tag: latest
   resources:
-    requests: { cpu: "50m", memory: "64Mi" }
-serviceMonitor:                    # chart flag is a no-op here; see standalone SM below
+    requests:
+      cpu: "50m"
+      memory: "64Mi"
+
+serviceMonitor:
   enabled: true
   interval: 15s
-  extraLabels: { release: prometheus }
+  scrapeTimeout: 10s
+  extraLabels:
+    release: prometheus
 \end{lstlisting}
 
-\begin{lstlisting}[caption={KEDA \texttt{ScaledObject} with the cache-miss-ratio trigger (\texttt{redis-keda-scaling.yaml}).},label={lst:keda-scaledobject}]
-apiVersion: keda.sh/v1alpha1
-kind: ScaledObject
-metadata: { name: redis-keda-scaler, namespace: redis }
-spec:
-  scaleTargetRef:                  # the operator's CR, NOT a StatefulSet
-    apiVersion: redis.redis.opstreelabs.in/v1beta2
-    kind: RedisCluster
-    name: redis-cluster
-  minReplicaCount: 3
-  maxReplicaCount: 6
-  advanced:
-    restoreToOriginalReplicaCount: true
-    horizontalPodAutoscalerConfig:
-      behavior:                    # IDENTICAL to the HPA's behavior block
-        scaleDown:
-          stabilizationWindowSeconds: 300
-          policies: [{ type: Pods, value: 1, periodSeconds: 60 }]
-        scaleUp:
-          stabilizationWindowSeconds: 0
-          policies: [{ type: Pods, value: 1, periodSeconds: 180 }]
-  triggers:
-    - type: prometheus
-      metricType: Value
-      metadata:
-        serverAddress: http://prometheus-kube-prometheus-prometheus. monitoring.svc.cluster.local:9090
-        query: |
-          sum(rate(redis_keyspace_misses_total {namespace="redis"}[1m]))
-          /
-          (sum(rate( {namespace="redis"}[1m])) + sum(rate(redis_keyspace_misses_total {namespace="redis"}[1m])))
-        threshold: "0.05"
-\end{lstlisting}
+\subsection{Experimental Test Flow}
+\label{subsec:architecture-flow}
 
-\begin{lstlisting}[caption={Standalone \texttt{ServiceMonitor} for the operator's exporters (\texttt{redis-servicemonitor.yaml}).},label={lst:servicemonitor-operator}]
-apiVersion: monitoring.coreos.com/v1
-kind: ServiceMonitor
-metadata:
-  name: redis-operator-monitor
-  namespace: redis
-  labels: { release: prometheus }
-spec:
-  selector:                        # selects both leader-metrics and follower-metrics services
-    matchLabels:
-      app.kubernetes.io/component: metrics
-      redis_setup_type: cluster
-  endpoints:
-    - { port: redis-exporter, interval: 15s }
-\end{lstlisting}
+The empirical evaluation is driven by an automated, deterministic execution pipeline (\texttt{data-safety-experiment.sh}) designed to enforce identical baseline conditions across both experimental scenarios. The pipeline advances through five strict, verifiable phases:
 
-% ------------------------------------------------------------
-\subsubsection{The \texttt{ot-operators} and \texttt{keda} Namespaces: Scaling Controllers}
-\label{subsubsec:ns-controllers}
-% ------------------------------------------------------------
+\paragraph{Phase 1: Deterministic Environment Initialization.}
+To guarantee that residual state from prior executions does not contaminate the findings, every test iteration begins with a comprehensive environment purge. The pipeline systematically uninstalls all Helm releases, deletes the relevant Kubernetes namespaces, and destroys all \texttt{PersistentVolumeClaims} associated with the Redis workloads. The execution halts until Kubernetes confirms the absolute termination of all prior resources, ensuring a sterile baseline.
 
-The operator scenario depends on two cluster-wide controllers that are installed once,
-via Helm, and shared across runs; they are not redeployed by the per-experiment scripts.
-The \texttt{ot-operators} namespace runs the Opstree Redis Operator, a custom controller
-that watches \texttt{RedisCluster} resources and reconciles them into running clusters,
-encoding the Redis-specific domain knowledge---cluster formation, slot assignment, and
-topology-aware resharding---that Kubernetes' generic primitives lack
-(\cite{k8s:operator}). The \texttt{keda} namespace runs the KEDA controller, which
-materialises a managed \texttt{HorizontalPodAutoscaler} from each \texttt{ScaledObject}
-and exposes the external Prometheus metric to it (\cite{keda:home}). In this design the
-\texttt{ScaledObject} itself (Listing~\ref{lst:keda-scaledobject}) lives in the
-\texttt{redis} namespace alongside its target, while the controller that acts on it is
-cluster-wide. The HPA scenario uses neither controller; its autoscaler is the built-in
-Kubernetes HPA controller, requiring no additional namespace.
+\paragraph{Phase 2: Baseline Provisioning and Geometry Validation.}
+The designated data tier is deployed and configured to form a four-node cluster consisting exclusively of master nodes, deliberately omitting replicas to ensure that any topological failure directly manifests as a measurable data cliff rather than being temporarily masked by high-availability failover mechanisms. In the native primitive scenario, the \texttt{StatefulSet} is scaled to four, and the \texttt{redis-cli --cluster create} command is executed to allocate $4{,}096$ hash slots to each node. In the operator scenario, the \texttt{RedisCluster} resource is applied with a \texttt{clusterSize} of four, delegating the cluster formation to the custom controller. The pipeline subsequently polls the primary node until the cluster explicitly reports a \texttt{cluster\_state:ok} status with all $16{,}384$ hash slots successfully covered.
 
-% ------------------------------------------------------------
-\subsubsection{The \texttt{monitoring} Namespace: Observability Stack}
-\label{subsubsec:ns-monitoring}
-% ------------------------------------------------------------
+\paragraph{Phase 3: Quiescent Data Population.}
+Following the successful validation of the cluster geometry, the pipeline injects a highly deterministic, verifiable dataset. Utilizing the \texttt{redis-cli} binary acting as the sole writer within the cluster, exactly \num{5000} distinct keys are populated sequentially. Because the workload utilizes standard key distributions without hash tags, the dataset is uniformly striped across all four master nodes. The absence of any concurrent read or write traffic guarantees that the cluster enters the subsequent scaling phase in a perfectly quiescent, stable state.
 
-The \texttt{monitoring} namespace hosts the observability stack, deployed once from the
-\texttt{kube-prometheus-stack} Helm chart, which bundles Prometheus and Grafana
-(\cite{artifacthub:kube-prometheus-stack}). It is identical across both experimental
-conditions. The values overrides are shown in Listing~\ref{lst:prometheus-values}:
-control-plane scrape jobs that do not apply to a k3s distribution are disabled; both
-Prometheus and Grafana are exposed via \texttt{NodePort}; and, critically, the
-Prometheus \texttt{enableRemoteWriteReceiver} flag is set so that the off-cluster k6
-generator can push its client-side metrics into the same Prometheus instance.
+\paragraph{Phase 4: Controlled Scale-In Execution.}
+To isolate the execution mechanism from the latency and heuristic variations of an active autoscaler, the scaling trigger is invoked imperatively. This phase directly simulates the exact system calls that the HPA or KEDA controllers would generate when commanding a downscale from four nodes to three:
+\begin{itemize}
+    \item \textbf{In the native scenario:} The \texttt{StatefulSet} replica count is patched from four to three, triggering Kubernetes to terminate the highest-ordinal pod (\texttt{redis-3}) in strict accordance with reverse-ordinal deletion rules (\cite{k8s:statefulset}).
+    \item \textbf{In the operator scenario:} The \texttt{clusterSize} parameter within the \texttt{RedisCluster} resource is patched from four to three, prompting the operator's reconciliation loop to orchestrate a data drain prior to pod termination.
+\end{itemize}
 
-Prometheus discovers its in-cluster scrape targets through the \texttt{ServiceMonitor}
-resources defined in the \texttt{redis} namespace
-(Listings~\ref{lst:servicemonitor-hpa} and~\ref{lst:servicemonitor-operator}), which
-point it at the Redis exporters, and through the FastAPI service's instrumentation
-endpoint (\cite{prometheus:overview}). The same Prometheus instance serves a dual role:
-it is both the visualisation backend for Grafana (\cite{grafana:github}) and the
-external metric source that the KEDA cache-miss-ratio trigger queries, creating a single
-unified data path from application telemetry to autoscaling decisions.
-
-\begin{lstlisting}[caption={\texttt{kube-prometheus-stack} Helm values (\texttt{my-prometheus-values.yaml}).},label={lst:prometheus-values}]
-kubeControllerManager: { enabled: false }   # not exposed by k3s
-kubeEtcd:              { enabled: false }
-kubeProxy:            { enabled: false }
-kubeScheduler:        { enabled: false }
-grafana:
-  service: { type: NodePort }
-prometheus:
-  service: { type: NodePort }
-  prometheusSpec:
-    enableRemoteWriteReceiver: true          # accept k6 remote-write
-\end{lstlisting}
-
-% ============================================================
-\subsection{End-to-End Data Flow}
-\label{subsec:data-flow}
-% ============================================================
-
-Bringing the layers together, a single iteration during a test run traverses the path
-illustrated in Figure~\ref{fig:architecture-overview}:
-
-\begin{enumerate}
-    \item k6 on the intermediary VM issues an HTTP request to one of the six node IPs on
-    \texttt{NodePort} \texttt{30080}, which routes to a FastAPI entrypoint pod.
-    \item The FastAPI handler hashes the leaderboard key and issues the corresponding
-    sorted-set command to the responsible Redis master, resolved through the data-tier
-    service; it returns the result to k6.
-    \item The Redis exporter sidecars and the FastAPI instrumentation expose metrics,
-    which Prometheus scrapes on its interval; k6 concurrently remote-writes its own
-    client-side metrics to Prometheus.
-    \item The active scaling module consumes those metrics: the HPA reads CPU
-    utilisation from the metrics API, whereas KEDA reads the Prometheus
-    cache-miss-ratio. Each computes a desired size and acts---scaling a role-blind
-    \texttt{StatefulSet} in the HPA case, or changing \texttt{clusterSize} (and thereby
-    triggering an operator reshard) in the KEDA case.
-    \item Grafana queries Prometheus and renders both cluster-side and client-side
-    series on shared dashboards, providing the observations recorded in
-    Section~\ref{sec:results}.
-\end{enumerate}
-
-Every component on this path other than the scaling module in step~4 is held constant
-across the two experimental conditions, so the comparison in Section~\ref{sec:results}
-isolates the scaling mechanism.
+\paragraph{Phase 5: Integrity Verification and Telemetry Capture.}
+Immediately following the successful termination of the target pod, the pipeline issues a cluster state verification request to the surviving primary node. The experiment programmatically records the updated \texttt{cluster\_state}, the total number of successfully assigned hash slots, and the surviving key count. To actively verify availability, the pipeline issues read probes against specific keys distributed throughout the keyspace, monitoring for \texttt{CLUSTERDOWN} errors that indicate a compromised topological state resulting from orphaned slots.
