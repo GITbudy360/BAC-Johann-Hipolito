@@ -136,7 +136,7 @@ replica available to mask or delay the loss.
 \paragraph{Scale-in (phase~4).} The departure of one master is effected by the single
 command \texttt{k3s kubectl scale statefulset redis -n redis -{}-replicas=\$END\_MASTERS},
 whose completion is awaited with
-\texttt{k3s kubectl wait -{}-for=delete pod/redis-\$END\_MASTERS -n redis -{}-timeout=120s}.
+\texttt{k3s kubectl wait -{}-for=delete pod/redis- \$END\_MASTERS -n redis -{}-timeout=120s}.
 This is, by construction, the exact action that the Horizontal Pod Autoscaler performs on
 scale-down: a StatefulSet terminates its pods in strictly descending ordinal order
 (\cite{k8s:statefulset}), so the command deletes the highest-ordinal pod, \texttt{redis-3},
@@ -168,7 +168,7 @@ necessary \texttt{CLUSTER MEET} commands and assigning the slots without any man
 
 \paragraph{Scale-in (phase~4).} The departure of one master is requested declaratively, by
 lowering the desired size on the custom resource with
-\texttt{k3s kubectl patch rediscluster redis-cluster -n redis -{}-type merge -p '\{"spec":\{"clusterSize":\$END\_MASTERS\}\}'},
+\texttt{k3s kubectl patch rediscluster redis-cluster -n redis -{}-type merge -p '\{"spec":\{"clusterSize": \$END\_MASTERS\}\}'},
 whose effect is awaited with
 \texttt{k3s kubectl wait -{}-for=delete pod/redis-cluster-leader-\$END\_MASTERS -n redis -{}-timeout=600s}.
 Unlike the StatefulSet decrement of Scenario~A, this mechanism is topology-aware: the

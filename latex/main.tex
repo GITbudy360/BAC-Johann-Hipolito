@@ -130,12 +130,24 @@
 \phantomsection
 \section*{Kurzfassung}
 \addcontentsline{toc}{section}{Kurzfassung}
-Hier steht die Kurzfassung auf Deutsch.
+Die Migration zustandsbehafteter Workloads, wie etwa partitionierter Datenbanken wie Redis, nach Kubernetes verursacht erhebliche architektonische Konflikte. Native Kubernetes-Skalierungsmechanismen, insbesondere der Horizontal Pod Autoscaler (HPA) und der \texttt{StatefulSet}-Controller, gehen von der generellen Austauschbarkeit von Rechenressourcen aus. Bei Scale-in-Vorgängen verwenden sie einen topologieblinden Löschmechanismus in umgekehrter Reihenfolge, der notwendige Datenmigrationsprotokolle umgeht und einen katastrophalen Datenverlust riskiert.
 
+Diese Arbeit untersucht diese architektonischen Einschränkungen empirisch anhand eines deterministischen, lastfreien A/B-Tests. Die Studie evaluiert den Scale-in eines Redis-Clusters von vier auf drei Master-Knoten mit \num{5000} Datensätzen (Keys). Dabei wird die native HPA-Baseline mit dem Opstree Redis Operator, gesteuert durch Kubernetes Event-driven Autoscaling (KEDA), verglichen.
+
+Die empirischen Ergebnisse zeigen, dass ein nativer HPA-Scale-in einen massiven Datenverlust verursacht. Dies führte zum sofortigen Verlust von 25\,\% des Datensatzes (\num{1250} Keys), \num{4096} verwaisten Hash-Slots und einer clusterweiten Nichtverfügbarkeit. Im Gegensatz dazu fing der Operator den Skalierungsbefehl erfolgreich ab, um einen präemptiven, topologiebewussten Resharding-Prozess zu orchestrieren. Dies ermöglichte einen reibungslosen Scale-in ohne Datenverlust und mit durchgehender Verfügbarkeit.
+
+Letztendlich belegt diese Untersuchung, dass die Implementierung domänenspezifischer Orchestrierungslogik durch das Operator-Pattern nicht nur eine operative Erleichterung, sondern eine absolute architektonische Notwendigkeit darstellt, um die Datenintegrität bei der Skalierung zustandsbehafteter Workloads in Kubernetes zu gewährleisten.
+\newpage
 \phantomsection
 \section*{Abstract}
 \addcontentsline{toc}{section}{Abstract}
-Here is the abstract in English.
+The migration of stateful workloads, such as sharded databases like Redis, into Kubernetes introduces significant architectural friction. Native Kubernetes scaling primitives, specifically the Horizontal Pod Autoscaler (HPA) and the \texttt{StatefulSet} controller, operate on the assumption of compute fungibility. During scale-in operations, they employ a topology-blind, reverse-ordinal pod deletion mechanism that bypasses necessary data migration protocols, risking catastrophic data loss.
+
+This thesis empirically investigates these architectural limitations through a deterministic, quiescent A/B test. The study evaluates a scale-in operation from four to three master nodes on a Redis cluster containing \num{5000} keys. It compares the native HPA baseline against the Opstree Redis Operator, driven by Kubernetes Event-driven Autoscaling (KEDA).
+
+The empirical findings demonstrate that a native HPA scale-in induces a severe data cliff. This resulted in the immediate loss of 25\% of the dataset (\num{1250} keys), \num{4096} orphaned hash slots, and cluster-wide unavailability. Conversely, the operator successfully intercepted the scaling command to orchestrate a pre-emptive, topology-aware resharding process. This achieved a graceful scale-in with zero data loss and continuous cluster availability.
+
+Ultimately, this research proves that encoding domain-specific orchestration logic via the Operator pattern is not merely an operational convenience, but an absolute architectural necessity for safeguarding data integrity when scaling stateful workloads in Kubernetes.
 
 % Nach dem Abstract auf arabische Seitenzahlen umstellen
 \newpage
@@ -165,41 +177,595 @@ Here is the abstract in English.
 % Anhang (keine Kopfzeile, keine Linie)
 \thispagestyle{nohead} % Kopfzeile nur auf dieser Seite ausblenden
 \phantomsection
-\section*{Anhang}
-\addcontentsline{toc}{section}{Anhang}
-Hier steht der Anhang.
+\section*{Appendix}
+\addcontentsline{toc}{section}{Appendix}
+
+\subsection*{Appendix A: Test Execution Script}
+\begin{lstlisting}[language=bash, caption={The deterministic data-safety experiment script (data-safety-experiment.sh).}]
+
+#!/bin/bash
+# Data-safety experiment: does a single, QUIESCENT scale-in preserve all 16384 slots and all
+# keys? Run once per scenario, then compare the BEFORE/AFTER tables.
+#
+#   Usage:  ./data-safety-experiment.sh [hpa|operator]
+#   Env:    KEYS=5000  START_MASTERS=4  END_MASTERS=3
+#
+# This is the MINIMAL, bulletproof proof. It deliberately uses NO autoscaler, NO FastAPI
+# entrypoint and NO k6 - keys are written directly with redis-cli, so the run is quiescent by
+# construction (zero workload traffic) and the result is deterministic. The single variable is
+# the scaling MECHANISM:
+#   * hpa      -> remove the highest-ordinal pod (the exact action HPA performs). No reshard.
+#   * operator -> lower clusterSize (the operator drains the master FIRST, then removes it).
+# The thesis metric is DATA LOSS (keys lost / slots permanently uncovered), NOT whether the
+# transition was perfectly autonomous.
+set -e
+
+GREEN='\033[0;32m'; BLUE='\033[0;34m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; NC='\033[0m'
+cd "$(dirname "$0")"
+export KUBECONFIG="${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
+
+SCENARIO="${1:-}"
+KEYS="${KEYS:-5000}"            # exact number of keys to populate
+START_MASTERS="${START_MASTERS:-4}"
+END_MASTERS="${END_MASTERS:-3}"
+
+if [[ "$SCENARIO" != "hpa" && "$SCENARIO" != "operator" ]]; then
+    echo -e "${RED}Usage: $0 [hpa|operator]   (env: KEYS, START_MASTERS, END_MASTERS)${NC}"
+    exit 1
+fi
+# Leader-0 pod name differs per scenario; every redis-cli call execs through it (ordinal 0 is
+# never removed, so it survives the scale-in).
+if [[ "$SCENARIO" == "hpa" ]]; then LEAD=redis-0; else LEAD=redis-cluster-leader-0; fi
+
+echo -e "${BLUE}=== Data-Safety Experiment: ${SCENARIO} (${START_MASTERS} -> ${END_MASTERS} masters, ${KEYS} keys) ===${NC}\n"
+
+# --- helper: read authoritative cluster state from leader-0 -> SNAP_STATE/SNAP_SLOTS/SNAP_KEYS
+snapshot() {
+    local info chk
+    # NOTE: `redis-cli --cluster check` returns EXIT 1 on ANY warning (open slots, a not-yet-formed
+    # cluster, nodes still joining). Under `set -e` a bare `chk=$(...)` would abort the whole script
+    # mid-formation (silently, since stderr is /dev/null). Guard both with `|| true` - we only want
+    # their stdout here, the health is judged from cluster_state/slots below.
+    info=$(k3s kubectl exec "$LEAD" -n redis -- redis-cli cluster info 2>/dev/null | tr -d '\r') || true
+    chk=$(k3s kubectl exec "$LEAD" -n redis -- redis-cli --cluster check 127.0.0.1:6379 2>/dev/null) || true
+    SNAP_STATE=$(echo "$info" | awk -F: '/^cluster_state:/{print $2}')
+    SNAP_SLOTS=$(echo "$info" | awk -F: '/^cluster_slots_ok:/{print $2}')
+    SNAP_KEYS=$(echo "$chk" | grep -oE '[0-9]+ keys in' | grep -oE '^[0-9]+' | head -1)
+}
+
+# 1. Clean slate.
+echo -e "${YELLOW}[1/5] Scorching the redis namespace...${NC}"
+set +e
+helm uninstall redis-cluster -n redis >/dev/null 2>&1
+k3s kubectl delete -f ../config/redis/ scaling-scenario-hpa/redis-hpa-cluster.yaml --ignore-not-found=true >/dev/null 2>&1
+k3s kubectl delete -f ../config/redis/ scaling-scenario-hpa/redis-servicemonitor.yaml --ignore-not-found=true >/dev/null 2>&1
+k3s kubectl delete -f ../config/redis/ scaling-scenario-operator-keda/redis-servicemonitor.yaml --ignore-not-found=true >/dev/null 2>&1
+k3s kubectl delete pvc --all -n redis --ignore-not-found=true >/dev/null 2>&1
+k3s kubectl delete namespace redis --ignore-not-found=true
+k3s kubectl wait --for=delete namespace/redis --timeout=120s
+set -e
+k3s kubectl create namespace redis --dry-run=client -o yaml | k3s kubectl apply -f -
+
+# 2. Deploy the data tier (NO autoscaler, NO entrypoint, NO load).
+echo -e "${YELLOW}[2/5] Deploying the ${SCENARIO} data tier...${NC}"
+if [[ "$SCENARIO" == "hpa" ]]; then
+    # Self-managed cluster: StatefulSet + exporter, then hand-form START_MASTERS masters (no replicas).
+    k3s kubectl apply -f ../config/redis/ scaling-scenario-hpa/redis-hpa-cluster.yaml
+    k3s kubectl scale statefulset redis -n redis --replicas="${START_MASTERS}"
+    k3s kubectl rollout status statefulset redis -n redis --timeout=300s
+    k3s kubectl apply -f ../config/redis/ scaling-scenario-hpa/redis-servicemonitor.yaml
+    echo -e "Forming a ${START_MASTERS}-master cluster (no replicas)..."
+    ips=()
+    for i in $(seq 0 $((START_MASTERS-1))); do
+        ips+=("$(k3s kubectl get pod redis-$i -n redis -o jsonpath='{.status.podIP}'):6379")
+    done
+    k3s kubectl exec redis-0 -n redis -- redis-cli --cluster create "${ips[@]}" --cluster-yes
+else
+    # Operator-managed cluster: deploy DIRECTLY at START_MASTERS (clean initial formation avoids
+    # the flaky incremental scale-out reshard). No KEDA - we drive clusterSize by hand.
+    helm repo add ot-helm https://ot-container-kit.github.io/helm-charts/ >/dev/null 2>&1 || true
+    helm repo update ot-helm >/dev/null
+    helm upgrade --install redis-cluster ot-helm/redis-cluster -n redis \
+        -f ../config/redis/scaling-scenario-operator-keda/ redis-operator-cluster-values.yaml \
+        --set redisCluster.clusterSize="${START_MASTERS}"
+    k3s kubectl apply -f ../config/redis/scaling-scenario-operator-keda/ redis-servicemonitor.yaml
+    echo -e "Waiting for the operator to form the cluster..."
+    for _ in $(seq 1 60); do
+        k3s kubectl get statefulset redis-cluster-leader -n redis >/dev/null 2>&1 && break; sleep 2
+    done
+    k3s kubectl rollout status statefulset redis-cluster-leader -n redis --timeout=300s
+    k3s kubectl rollout status statefulset redis-cluster-follower -n redis --timeout=300s 2>/dev/null || true
+fi
+
+# Wait until the cluster reports healthy (all 16384 slots) before populating.
+echo -e "Waiting for the cluster to report healthy (cluster_state:ok, all 16384 slots)..."
+for _ in $(seq 1 60); do
+    snapshot
+    [[ "$SNAP_STATE" == "ok" && "$SNAP_SLOTS" == "16384" ]] && break
+    sleep 5
+done
+if [[ "$SNAP_STATE" == "ok" && "$SNAP_SLOTS" == "16384" ]]; then
+    echo -e "${GREEN}Cluster online: state=${SNAP_STATE} slots_ok=${SNAP_SLOTS}.${NC}\n"
+else
+    echo -e "${RED}Cluster did NOT reach a healthy 16384-slot state in time (state=${SNAP_STATE:-?} slots_ok=${SNAP_SLOTS:-?}).${NC}"
+    echo -e "${RED}Refusing to populate a half-formed cluster. Inspect: k3s kubectl get rediscluster,pods -n redis${NC}"
+    exit 1
+fi
+
+# 3. Populate a known, exact dataset (deterministic; spread across all slots, no hash tags).
+echo -e "${YELLOW}[3/5] Populating ${KEYS} keys via redis-cli (quiescent - this is the only writer)...${NC}"
+k3s kubectl exec "$LEAD" -n redis -- sh -c \
+    "for i in \$(seq 1 ${KEYS}); do echo set key:\$i \$i; done | redis-cli -c -h 127.0.0.1 >/dev/null"
+
+snapshot
+BEFORE_STATE="$SNAP_STATE"; BEFORE_SLOTS="$SNAP_SLOTS"; BEFORE_KEYS="${SNAP_KEYS:-0}"
+echo -e "${BLUE}BEFORE: state=${BEFORE_STATE} slots_ok=${BEFORE_SLOTS} keys=${BEFORE_KEYS}${NC}\n"
+
+# 4. The scale-in. From here on, don't abort on a wedge - capture and report it.
+set +e
+echo -e "${YELLOW}[4/5] Scaling in ${START_MASTERS} -> ${END_MASTERS} (removing one slot-owning master)...${NC}"
+if [[ "$SCENARIO" == "hpa" ]]; then
+    # The EXACT action HPA performs on scale-down: drop the highest-ordinal pod. No drain, no reshard.
+    k3s kubectl scale statefulset redis -n redis --replicas="${END_MASTERS}"
+    k3s kubectl wait --for=delete pod/redis-"${END_MASTERS}" -n redis --timeout=120s
+else
+    # The operator's mechanism: lower clusterSize; it migrates the departing master's slots to the
+    # survivors FIRST, then removes the pod.
+    k3s kubectl patch rediscluster redis-cluster -n redis --type merge \
+        -p "{\"spec\":{\"clusterSize\":${END_MASTERS}}}"
+    k3s kubectl wait --for=delete pod/redis-cluster-leader-"${END_MASTERS}" -n redis --timeout=600s
+fi
+sleep 5
+snapshot
+AFTER_STATE="$SNAP_STATE"; AFTER_SLOTS="$SNAP_SLOTS"; AFTER_KEYS="${SNAP_KEYS:-0}"
+
+# Read probe: with cluster-require-full-coverage (the default), ANY uncovered slot makes the WHOLE
+# cluster reject reads with CLUSTERDOWN. So a healthy cluster serves all; a cliffed one serves none.
+errs=0
+for k in 1 1000 2500 4000 4999; do
+    out=$(k3s kubectl exec "$LEAD" -n redis -- redis-cli -c -h 127.0.0.1 get "key:$k" 2>&1)
+    echo "$out" | grep -qiE "CLUSTERDOWN|error|not served" && errs=$((errs+1))
+done
+
+# 5. Report.
+echo -e "\n${BLUE}===================== DATA-SAFETY RESULT (${SCENARIO}) =====================${NC}"
+printf "%-10s %-10s %-12s %-8s\n" "" "state" "slots_ok" "keys"
+printf "%-10s %-10s %-12s %-8s\n" "BEFORE" "${BEFORE_STATE}" "${BEFORE_SLOTS}" "${BEFORE_KEYS}"
+printf "%-10s %-10s %-12s %-8s\n" "AFTER"  "${AFTER_STATE}"  "${AFTER_SLOTS}"  "${AFTER_KEYS}"
+lost=$(( ${BEFORE_KEYS:-0} - ${AFTER_KEYS:-0} ))
+echo -e "Read probe after scale-in: ${errs}/5 keys returned a cluster error (CLUSTERDOWN)."
+echo ""
+if [[ "$AFTER_STATE" == "ok" && "$AFTER_SLOTS" == "16384" && "$lost" -le 0 ]]; then
+    echo -e "${GREEN}VERDICT: GRACEFUL scale-in - all 16384 slots covered, 0 keys lost.${NC}"
+else
+    echo -e "${RED}VERDICT: DATA CLIFF - state=${AFTER_STATE} slots_ok=${AFTER_SLOTS}, ${lost} keys lost.${NC}"
+fi
+
+# Distinguish a recoverable operator STALL (no data lost) from a true cliff.
+if [[ "$SCENARIO" == "operator" ]] && k3s kubectl get pod redis-cluster-leader-"${END_MASTERS}" -n redis >/dev/null 2>&1; then
+    echo -e "${YELLOW}NOTE: leader-${END_MASTERS} is still present - the drain STALLED (open slot). Data is NOT lost"
+    echo -e "      (slots are mid-migration, recoverable). Complete it with:"
+    echo -e "      ${YELLOW}k3s kubectl exec -it redis-cluster-leader-0 -n redis -- redis-cli --cluster fix 127.0.0.1:6379${NC}"
+fi
+set -e
+
+echo -e "\n${GREEN}Done. The cluster is left in its post-scale-in state for Grafana capture.${NC}"
+echo -e "Import grafana/data-safety-dashboard.json and screenshot the panels for this run, then"
+echo -e "run the other scenario: ./data-safety-experiment.sh $([[ "$SCENARIO" == hpa ]] && echo operator || echo hpa)"
+
+\end{lstlisting}
+
+\subsection*{Appendix B: Raw HPA Scale-In Telemetry}
+\begin{lstlisting}[caption={Terminal output from the native HPA scale-in experiment.}]
+
+=== Data-Safety Experiment: hpa (4 -> 3 masters, 5000 keys) ===
+
+[1/5] Scorching the redis namespace...
+namespace/redis created
+[2/5] Deploying the hpa data tier...
+configmap/redis-min-config created
+service/redis-headless created
+statefulset.apps/redis created
+statefulset.apps/redis scaled
+Waiting for 4 pods to be ready...
+Waiting for 3 pods to be ready...
+Waiting for 3 pods to be ready...
+Waiting for 2 pods to be ready...
+Waiting for 2 pods to be ready...
+Waiting for 1 pods to be ready...
+Waiting for 1 pods to be ready...
+partitioned roll out complete: 4 new pods have been updated...
+servicemonitor.monitoring.coreos.com/redis-monitor created
+Forming a 4-master cluster (no replicas)...
+Defaulted container "redis" out of: redis, redis-exporter
+>>> Performing hash slots allocation on 4 nodes...
+Master[0] -> Slots 0 - 4095
+Master[1] -> Slots 4096 - 8191
+Master[2] -> Slots 8192 - 12287
+Master[3] -> Slots 12288 - 16383
+M: 7e07f27f25a8e3feb4cd6e8b7cb945b2ec1d01af 10.42.2.182:6379
+   slots:[0-4095] (4096 slots) master
+M: c69c7ec7973c848c8b07a24254094fc087e655e0 10.42.4.182:6379
+   slots:[4096-8191] (4096 slots) master
+M: fb2965980a30ab101927f34716f20ba5b67023f8 10.42.1.186:6379
+   slots:[8192-12287] (4096 slots) master
+M: 6b6b0bca0ea011d7ea3b542b35fd7f2ad47b44e4 10.42.0.136:6379
+   slots:[12288-16383] (4096 slots) master
+>>> Nodes configuration updated
+>>> Assign a different config epoch to each node
+>>> Sending CLUSTER MEET messages to join the cluster
+Waiting for the cluster to join
+.
+>>> Performing Cluster Check (using node 10.42.2.182:6379)
+M: 7e07f27f25a8e3feb4cd6e8b7cb945b2ec1d01af 10.42.2.182:6379
+   slots:[0-4095] (4096 slots) master
+M: c69c7ec7973c848c8b07a24254094fc087e655e0 10.42.4.182:6379
+   slots:[4096-8191] (4096 slots) master
+M: 6b6b0bca0ea011d7ea3b542b35fd7f2ad47b44e4 10.42.0.136:6379
+   slots:[12288-16383] (4096 slots) master
+M: fb2965980a30ab101927f34716f20ba5b67023f8 10.42.1.186:6379
+   slots:[8192-12287] (4096 slots) master
+[OK] All nodes agree about slots configuration.
+>>> Check for open slots...
+>>> Check slots coverage...
+[OK] All 16384 slots covered.
+Waiting for the cluster to report healthy (cluster_state:ok, all 16384 slots)...
+Cluster online: state=ok slots_ok=16384.
+
+[3/5] Populating 5000 keys via redis-cli (quiescent - this is the only writer)...
+Defaulted container "redis" out of: redis, redis-exporter
+BEFORE: state=ok slots_ok=16384 keys=5000
+
+[4/5] Scaling in 4 -> 3 (removing one slot-owning master)...
+statefulset.apps/redis scaled
+pod/redis-3 condition met
+
+===================== DATA-SAFETY RESULT (hpa) =====================
+           state      slots_ok     keys
+BEFORE     ok         16384        5000
+AFTER      ok         12288        3750
+Read probe after scale-in: 5/5 keys returned a cluster error (CLUSTERDOWN).
+
+VERDICT: DATA CLIFF - state=ok slots_ok=12288, 1250 keys lost.
+
+Done. The cluster is left in its post-scale-in state for Grafana capture.
+Import grafana/data-safety-dashboard.json and screenshot the panels for this run, then
+run the other scenario: ./data-safety-experiment.sh operator
+
+\end{lstlisting}
+
+\subsection*{Appendix C: Raw Operator Scale-In Telemetry}
+\begin{lstlisting}[caption={Terminal output from the operator scale-in experiment.}]
+
+=== Data-Safety Experiment: operator (4 -> 3 masters, 5000 keys) ===
+
+[1/5] Scorching the redis namespace...
+namespace "redis" deleted
+namespace/redis created
+[2/5] Deploying the operator data tier...
+Release "redis-cluster" does not exist. Installing it now.
+NAME: redis-cluster
+LAST DEPLOYED: Sun Jun  7 23:18:40 2026
+NAMESPACE: redis
+STATUS: deployed
+REVISION: 1
+TEST SUITE: None
+servicemonitor.monitoring.coreos.com/redis-operator-monitor created
+Waiting for the operator to form the cluster...
+Waiting for 4 pods to be ready...
+Waiting for 3 pods to be ready...
+Waiting for 3 pods to be ready...
+Waiting for 2 pods to be ready...
+Waiting for 2 pods to be ready...
+Waiting for 1 pods to be ready...
+Waiting for 1 pods to be ready...
+partitioned roll out complete: 4 new pods have been updated...
+Waiting for the cluster to report healthy (cluster_state:ok, all 16384 slots)...
+Cluster online: state=ok slots_ok=16384.
+
+[3/5] Populating 5000 keys via redis-cli (quiescent - this is the only writer)...
+Defaulted container "redis-cluster-leader" out of: redis-cluster-leader, redis-exporter
+BEFORE: state=ok slots_ok=16384 keys=5000
+
+[4/5] Scaling in 4 -> 3 (removing one slot-owning master)...
+rediscluster.redis.redis.opstreelabs.in/redis-cluster patched
+pod/redis-cluster-leader-3 condition met
+
+===================== DATA-SAFETY RESULT (operator) =====================
+           state      slots_ok     keys
+BEFORE     ok         16384        5000
+AFTER      ok         16384        5000
+Read probe after scale-in: 0/5 keys returned a cluster error (CLUSTERDOWN).
+
+VERDICT: GRACEFUL scale-in - all 16384 slots covered, 0 keys lost.
+
+Done. The cluster is left in its post-scale-in state for Grafana capture.
+Import grafana/data-safety-dashboard.json and screenshot the panels for this run, then
+run the other scenario: ./data-safety-experiment.sh hpa
+
+\end{lstlisting}
+
+\subsection*{Appendix D: Grafana Dashboard JSON}
+\begin{lstlisting}[caption={JSON code of the dashboard used in this experiment.}]
+  {
+  "__inputs": [
+    {
+      "name": "DS_PROMETHEUS",
+      "label": "Prometheus",
+      "description": "",
+      "type": "datasource",
+      "pluginId": "prometheus",
+      "pluginName": "Prometheus"
+    }
+  ],
+  "__requires": [
+    {"type": "grafana", "id": "grafana", "name": "Grafana", "version": "10.0.0"},
+    {"type": "datasource", "id": "prometheus", "name": "Prometheus", "version": "1.0.0"},
+    {"type": "panel", "id": "timeseries", "name": "Time series", "version": ""},
+    {"type": "panel", "id": "state-timeline", "name": "State timeline", "version": ""}
+  ],
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {"type": "grafana", "uid": "-- Grafana --"},
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "id": 1,
+      "title": "Slot Coverage - the Data Cliff (max across nodes)",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "Cluster-wide slot coverage. HPA scale-in orphans a master's slots -> drops below 16384 and cluster_state flips to fail. Operator reshards first -> stays flat at 16384.",
+      "gridPos": {"h": 9, "w": 12, "x": 0, "y": 0},
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 16384,
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "thresholdsStyle": {"mode": "line"}
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "red", "value": null},
+              {"color": "green", "value": 16384}
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["last", "min"]},
+        "tooltip": {"mode": "multi", "sort": "none"}
+      },
+      "targets": [
+        {"refId": "A", "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"}, "expr": "max(redis_cluster_slots_ok{namespace=\"redis\"})", "legendFormat": "slots_ok"},
+        {"refId": "B", "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"}, "expr": "max(redis_cluster_slots_assigned{namespace=\"redis\"})", "legendFormat": "slots_assigned"}
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Total Keys on Masters - Data Loss",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "Sum of keys across MASTER nodes (filtered to exclude replicas/followers, which mirror their master). HPA steps down at scale-in (keys vanish with the removed master); operator stays flat.",
+      "gridPos": {"h": 9, "w": 12, "x": 12, "y": 0},
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["last", "min", "max"]},
+        "tooltip": {"mode": "multi", "sort": "none"}
+      },
+      "targets": [
+        {"refId": "A", "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"}, "expr": "sum(redis_db_keys{namespace=\"redis\", pod=~\"redis-[0-9]+|redis-cluster-leader-[0-9]+\"})", "legendFormat": "keys (masters)"}
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Cluster State (ok / down)",
+      "type": "state-timeline",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "redis_cluster_state: 1 = ok (green), 0 = down (red). HPA flips to DOWN at the cliff; operator stays OK throughout.",
+      "gridPos": {"h": 6, "w": 12, "x": 0, "y": 9},
+      "fieldConfig": {
+        "defaults": {
+          "custom": {"fillOpacity": 80, "lineWidth": 0},
+          "color": {"mode": "thresholds"},
+          "mappings": [
+            {"type": "value", "options": {"0": {"text": "DOWN", "color": "red", "index": 0}}},
+            {"type": "value", "options": {"1": {"text": "OK", "color": "green", "index": 1}}}
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "red", "value": null},
+              {"color": "green", "value": 1}
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "mergeValues": true,
+        "showValue": "auto",
+        "alignValue": "center",
+        "rowHeight": 0.9,
+        "legend": {"displayMode": "list", "placement": "bottom"}
+      },
+      "targets": [
+        {"refId": "A", "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"}, "expr": "min(redis_cluster_state{namespace=\"redis\"})", "legendFormat": "cluster_state"}
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Cluster Topology (masters / known nodes)",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "cluster_size = masters serving slots; known_nodes = all nodes the cluster knows. Shows the scaling action and whether the removed master was actually integrated/drained.",
+      "gridPos": {"h": 6, "w": 12, "x": 12, "y": 9},
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 2,
+            "fillOpacity": 5,
+            "showPoints": "auto",
+            "spanNulls": false
+          },
+          "thresholds": {"mode": "absolute", "steps": [{"color": "blue", "value": null}]}
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["last"]},
+        "tooltip": {"mode": "multi", "sort": "none"}
+      },
+      "targets": [
+        {"refId": "A", "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"}, "expr": "max(redis_cluster_size{namespace=\"redis\"})", "legendFormat": "masters (cluster_size)"},
+        {"refId": "B", "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"}, "expr": "max(redis_cluster_known_nodes{namespace=\"redis\"})", "legendFormat": "known nodes"}
+      ]
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "tags": ["redis", "thesis", "data-safety"],
+  "templating": {
+    "list": [
+      {
+        "current": {},
+        "hide": 0,
+        "includeAll": false,
+        "label": "Datasource",
+        "multi": false,
+        "name": "DS_PROMETHEUS",
+        "options": [],
+        "query": "prometheus",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "type": "datasource"
+      }
+    ]
+  },
+  "time": {"from": "now-1h", "to": "now"},
+  "timepicker": {},
+  "timezone": "",
+  "title": "Redis Data-Safety Experiment (Scale-In)",
+  "uid": "redis-data-safety",
+  "version": 1,
+  "weekStart": ""
+}
+
+\end{lstlisting}
+
 
 % Glossar (keine Kopfzeile, keine Linie)
 \newpage
 \thispagestyle{nohead} % Kopfzeile nur auf dieser Seite ausblenden
 \phantomsection
 \section*{Glossar}
-\addcontentsline{toc}{section}{Glossar}
-Hier steht das Glossar.
+\addcontentsline{toc}{section}{Glossary}\begin{description}
+
+    \item[ConfigEpoch] A collision-resolution concept in a Redis Cluster used to determine which node holds the authoritative claim over a specific hash slot during split-brain or network partition events.
+    
+    \item[CRD (Custom Resource Definition)] An API extension mechanism in Kubernetes that allows users to define and instantiate custom resources, such as the \texttt{RedisCluster} resource utilized by the Opstree operator.
+    
+    \item[Data Cliff] A term utilized in this thesis to describe the sudden, catastrophic loss of data and cluster availability that occurs when a stateful node is terminated without prior data migration.
+    
+    \item[Ghost Pod] A pod provisioned by a generic autoscaler (like HPA) that joins a Kubernetes \texttt{StatefulSet} but remains unintegrated into the database topology, meaning it holds zero hash slots and serves no traffic.
+    
+    \item[Hash Slot] The fundamental unit of data partitioning in a Redis Cluster. The total keyspace is divided into exactly \num{16384} hash slots, which must be distributed across the master nodes to maintain cluster availability.
+    
+    \item[Horizontal Pod Autoscaler (HPA)] A native Kubernetes control loop that automatically updates a workload resource (such as a \texttt{StatefulSet}) to match demand based on observed metrics, such as average CPU utilization.
+    
+    \item[KEDA (Kubernetes Event-driven Autoscaling)] A single-purpose, lightweight component added to a Kubernetes cluster to drive autoscaling based on external event metrics, such as Prometheus cache-miss ratios.
+    
+    \item[Operator Pattern] A software extension to Kubernetes that encodes domain-specific operational knowledge into a custom controller to automate the lifecycle and topology management of complex stateful applications.
+    
+    \item[Quiescent] A state of execution where no external read or write traffic is applied to the database. This state is used in the experimental methodology to isolate scaling mechanics from load-induced resharding interruptions.
+    
+    \item[Resharding] The process of live-migrating hash slots, along with the underlying data they contain, from one node to another within an active database cluster.
+    
+    \item[Stateful Workload] An application or database (such as Redis) that persists client data across sessions, meaning its underlying compute pods contain unique data and are not strictly interchangeable.
+    
+    \item[StatefulSet] A native Kubernetes workload API object used to manage stateful applications, providing strict guarantees about the ordering and uniqueness of a set of Pods, including the enforcement of reverse-ordinal deletion during scale-in operations.
+
+\end{description}
+
 
 % Literaturverzeichnis (keine Kopfzeile, keine Linie)
 \newpage
 \thispagestyle{nohead} % Kopfzeile nur auf dieser Seite ausblenden
 \phantomsection
-\section*{Literaturverzeichnis}
-\addcontentsline{toc}{section}{Literaturverzeichnis}
+\section*{List of References}
+\addcontentsline{toc}{section}{List of References}
 \printbibliography[heading=none]
 
 % Stichwortverzeichnis (keine Kopfzeile, keine Linie)
-\newpage
-\thispagestyle{nohead} % Kopfzeile nur auf dieser Seite ausblenden
-\phantomsection
-\section*{Stichwortverzeichnis}
-\addcontentsline{toc}{section}{Stichwortverzeichnis}
-Hier steht das Stichwortverzeichnis.
+%\newpage
+%\thispagestyle{nohead} % Kopfzeile nur auf dieser Seite ausblenden
+%\phantomsection
+%\section*{Stichwortverzeichnis}
+%\addcontentsline{toc}{section}{Stichwortverzeichnis}
+%Hier steht das Stichwortverzeichnis.
 
 % Anlagen (keine Kopfzeile, keine Linie)
 \newpage
 \thispagestyle{nohead} % Kopfzeile nur auf dieser Seite ausblenden
 \phantomsection
-\section*{Anlagen}
-\addcontentsline{toc}{section}{Anlagen}
-Hier sind die Anlagen.
+\section*{Attachments}
+\addcontentsline{toc}{section}{Attachments}
+The following Attachments are included as a digital supplement to this thesis (as a ZIP archive in the submission system) and reference the complete codebase used for conducting the experiments.
+
+\begin{description}
+
+    \item[Attachment 1: Project repository (Quellcode)] \hfill \\
+    The complete GitHub repository contains all Kubernetes manifests, Bash automation scripts (\texttt{data-safety-experiment.sh}), FastAPI deployment files, and the raw Markdown output logs of the conducted experiments. \\
+    \textbf{URL:} \url{https://github.com/gitbudy360/bac-johann-hipolito} \\
+    \textbf{Commit-Hash:} \texttt{d8cddc613407455bec482cb6d7217072cc3a2d32}
+
+    \item[Attachment 2: Grafana Dashboards] \hfill \\
+    The JSON-exports of the Grafana dashboards used for visualizing hash slot assignments and key metrics during the scale-in phases. Located in the \texttt{/k8s-cluster/grafana/} directory.
+
+\end{description}
 
 \end{document}
 
