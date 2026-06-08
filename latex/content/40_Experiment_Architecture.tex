@@ -86,7 +86,7 @@ this isolated run, since no autoscaler is deployed; the scale-in is instead driv
 A \texttt{ServiceMonitor} (Listing~\ref{lst:servicemonitor-hpa}) wires the exporter into
 Prometheus.
 
-\begin{lstlisting}[caption={Redis \texttt{ConfigMap}, headless \texttt{Service}, and \texttt{StatefulSet} (\texttt{redis-hpa-cluster.yaml}).},label={lst:redis-statefulset}]
+\begin{lstlisting}[caption={Redis \texttt{ConfigMap}, headless \texttt{Service}, and \texttt{StatefulSet} (\texttt{redis-hpa-cluster.\ac{yaml}}).},label={lst:redis-statefulset}]
 apiVersion: v1
 kind: ConfigMap
 metadata: { name: redis-min-config, namespace: redis }

@@ -175,7 +175,7 @@ Ultimately, this research proves that encoding domain-specific orchestration log
 \appendix
 
 % Anhang (keine Kopfzeile, keine Linie)
-\thispagestyle{nohead} % Kopfzeile nur auf dieser Seite ausblenden
+\pagestyle{nohead} % Kopfzeile nur auf dieser Seite ausblenden
 \phantomsection
 \section*{Appendix}
 \addcontentsline{toc}{section}{Appendix}
@@ -699,7 +699,7 @@ run the other scenario: ./data-safety-experiment.sh hpa
 
 % Glossar (keine Kopfzeile, keine Linie)
 \newpage
-\thispagestyle{nohead} % Kopfzeile nur auf dieser Seite ausblenden
+\pagestyle{nohead} % Kopfzeile nur auf dieser Seite ausblenden
 \phantomsection
 \section*{Glossar}
 \addcontentsline{toc}{section}{Glossary}\begin{description}
@@ -733,7 +733,7 @@ run the other scenario: ./data-safety-experiment.sh hpa
 
 % Literaturverzeichnis (keine Kopfzeile, keine Linie)
 \newpage
-\thispagestyle{nohead} % Kopfzeile nur auf dieser Seite ausblenden
+\pagestyle{nohead} % Kopfzeile nur auf dieser Seite ausblenden
 \phantomsection
 \section*{List of References}
 \addcontentsline{toc}{section}{List of References}
@@ -760,10 +760,10 @@ The following Attachments are included as a digital supplement to this thesis (a
     \item[Attachment 1: Project repository (Quellcode)] \hfill \\
     The complete GitHub repository contains all Kubernetes manifests, Bash automation scripts (\texttt{data-safety-experiment.sh}), FastAPI deployment files, and the raw Markdown output logs of the conducted experiments. \\
     \textbf{URL:} \url{https://github.com/gitbudy360/bac-johann-hipolito} \\
-    \textbf{Commit-Hash:} \texttt{d8cddc613407455bec482cb6d7217072cc3a2d32}
+    \textbf{Commit-Hash:} \texttt{e060e151e3c95d2c6118f3ef21c70aa763332072}
 
     \item[Attachment 2: Grafana Dashboards] \hfill \\
-    The JSON-exports of the Grafana dashboards used for visualizing hash slot assignments and key metrics during the scale-in phases. Located in the \texttt{/k8s-cluster/grafana/} directory.
+    The \ac{JSON}-exports of the Grafana dashboards used for visualizing hash slot assignments and key metrics during the scale-in phases. Located in the \texttt{/k8s-cluster/grafana/} directory.
 
 \end{description}
 
