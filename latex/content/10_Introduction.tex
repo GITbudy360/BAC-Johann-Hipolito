@@ -6,7 +6,7 @@
 
 The rapid evolution of modern software systems has fundamentally transformed the way
 infrastructure is designed, deployed, and operated. At the heart of this transformation
-lies \textit{cloud computing} — a paradigm that enables on-demand access to a shared pool
+lies \textit{cloud computing}---a paradigm that enables on-demand access to a shared pool
 of configurable computing resources, including networks, servers, storage, applications,
 and services, that can be rapidly provisioned and released with minimal management effort
 (\cite{nist:cloudcomputing}). This model has shifted the industry away from static,
@@ -20,7 +20,7 @@ concerns into a set of established design principles for container-based workloa
 emphasising repeatability, automation, and observability as first-class concerns in
 modern infrastructure (\cite{aws:containerlens}).
 
-A critical enabler of cloud-native architectures is the \textit{container} — a
+A critical enabler of cloud-native architectures is the \textit{container}---a
 lightweight, self-contained unit of software that packages application code together with
 its dependencies, configuration, and runtime environment. Unlike traditional virtual
 machines, containers share the host operating system kernel and therefore incur
@@ -35,8 +35,8 @@ demand.
 Managing containerised workloads at scale introduces significant operational complexity.
 Scheduling containers across a fleet of machines, maintaining desired application state,
 performing rolling updates, and recovering from failures all require robust automation.
-It is in response to exactly these challenges that \textit{Kubernetes} — also referred
-to as K8s — emerged as the dominant container orchestration platform.
+It is in response to exactly these challenges that \textit{Kubernetes}---also referred
+to as K8s---emerged as the dominant container orchestration platform.
 
 Originally designed and used internally at Google as the \textit{Borg} system, Kubernetes
 was open-sourced in 2014 and donated to the Cloud Native Computing Foundation (CNCF),
@@ -47,7 +47,7 @@ observed state of the system against this desired state, automatically schedulin
 managing service discovery, and orchestrating storage (\cite{kubernetes:overview}).
 
 To reduce operational complexity further, lightweight Kubernetes distributions such as
-\textit{K3s} — developed by Rancher and certified by the CNCF — have gained widespread
+\textit{K3s}---developed by Rancher and certified by the CNCF---have gained widespread
 adoption. K3s packages the full Kubernetes feature set into a single binary with a
 significantly reduced memory footprint, making it suitable for edge computing, IoT
 environments, and resource-constrained infrastructure (\cite{k3s:docs}). In the context
@@ -56,8 +56,8 @@ experimental infrastructure under investigation.
 
 \subsection{The Challenge of Scaling Stateful Applications}
 
-While Kubernetes excels at managing stateless workloads — where any replica of a
-service can handle any request independently — scaling \textit{stateful applications}
+While Kubernetes excels at managing stateless workloads---where any replica of a
+service can handle any request independently---scaling \textit{stateful applications}
 presents a distinct set of challenges. Stateful applications, such as in-memory databases
 and message queues, maintain persistent data or internal state that must be carefully
 managed across the lifecycle of individual pods. Kubernetes provides the
@@ -68,58 +68,101 @@ identities, ordered deployment and scaling, and persistent volume binding
 \textit{Redis} is a canonical example of such a stateful application. It is a
 high-performance, in-memory data store widely used for caching, session management, and
 real-time analytics (\cite{redis:io}). When deployed as a Redis Cluster across multiple
-nodes, it uses sharding to distribute data and replication to ensure fault tolerance.
-Scaling a Redis Cluster in a Kubernetes environment is non-trivial: adding or removing
-nodes requires coordinated resharding of data slots, careful management of cluster
-topology, and maintenance of quorum — operations that introduce significant risk if
-performed reactively under resource pressure.
+nodes, it uses sharding to distribute its keyspace and replication to ensure fault
+tolerance. Scaling a Redis Cluster in a Kubernetes environment is non-trivial: adding or
+removing nodes requires the coordinated resharding of data slots, careful management of
+cluster topology, and maintenance of quorum---operations that introduce significant risk
+if performed without regard to the cluster's internal state.
 
 Recent work from the CNCF community has highlighted these concerns, noting that while
 Kubernetes operators can partially automate lifecycle management for Redis, the path
 toward robust, cloud-native stateful services remains an open challenge
 (\cite{cncf:redisoperator}).
 
-\subsection{Autoscaling Strategies: From Reactive to Predictive}
+\subsection{Native Scaling and the Topology Gap}
 
-Kubernetes provides native support for horizontal scaling through the
-\textit{Horizontal Pod Autoscaler} (HPA), which monitors CPU and memory utilisation
-metrics and adjusts the number of pod replicas accordingly (\cite{kubernetes:autoscaling}).
-While the HPA is effective for stateless services under gradually increasing load, its
-reactive nature introduces an inherent latency: scaling decisions are made only
-\textit{after} resource thresholds have already been breached. For latency-sensitive or
-stateful workloads, this lag can result in degraded performance, pod restarts, or
-cascading failures during traffic spikes (\cite{thoras:hpa}).
+Kubernetes provides native support for horizontal scaling through the \textit{Horizontal
+Pod Autoscaler} (HPA), which monitors resource-utilisation metrics such as CPU and memory
+and adjusts the number of pod replicas accordingly (\cite{kubernetes:autoscaling}). For
+stateless services this mechanism is entirely sufficient, because every replica is
+interchangeable and may therefore be added or removed without coordination. The HPA's
+reactive nature---scaling decisions are taken only after a utilisation threshold has
+already been breached---has been criticised as ill-suited to latency-sensitive and
+stateful workloads (\cite{thoras:hpa}), and event-driven frameworks such as \ac{KEDA} have
+emerged to move the scaling decision upstream of resource exhaustion by triggering on
+application-level signals (\cite{keda:home}; \cite{cncf:kedagrad}).
 
-An increasingly popular alternative is \textit{Kubernetes Event-Driven Autoscaling}
-(\ac{KEDA}), a CNCF-graduated project that extends the standard HPA to support event- and
-metric-driven scaling from a rich ecosystem of external sources, including message
-queues, databases, and custom Prometheus metrics (\cite{keda:home}; \cite{cncf:kedagrad}).
-By decoupling scaling decisions from simple resource utilisation and enabling them to
-respond to application-level events, KEDA enables a more proactive and context-aware
-approach to scaling. This is particularly relevant for stateful workloads where
-pre-emptive resource provisioning may prevent the cluster-level disruptions that reactive
-scaling cannot avoid.
+For a sharded, stateful store, however, the more fundamental difficulty lies not in
+\textit{when} a scaling decision is taken but in \textit{how} it is mechanically carried
+out. The HPA, and indeed any controller that drives a \texttt{StatefulSet}, manipulates
+only the replica \textit{count}; it possesses no model of the cluster's internal
+\textit{topology} and, in particular, no notion of which of the \num{16384} hash slots a
+given pod owns (\cite{redis:clusterspec}). On scale-out this limitation manifests as
+capacity that the cluster cannot integrate, but on scale-in---the operation with which
+this thesis is principally concerned---it becomes far more dangerous, because deleting a
+slot-owning master without first migrating its slots elsewhere abandons a portion of the
+keyspace outright (\cite{redis:scaling}; \cite{googlecloud:zerodowntime}). This is the
+precise sense in which \textit{pods are not shards}: terminating a pod does not relocate
+the data for which it was responsible.
+
+It is to close exactly this gap that the Kubernetes \textit{operator pattern} was
+conceived. An operator encodes the application-specific operational knowledge of a human
+expert into a controller that participates in the standard reconciliation loop
+(\cite{kubernetes:operatorpattern}), and a Redis operator can therefore enforce the
+invariant that a master must be \textit{drained}---its slots resharded onto the
+survivors---before it is removed. The central comparison undertaken by this thesis is
+consequently not one of reactive against predictive autoscaling, but of topology-blind
+against topology-aware scaling, evaluated on the single operation where the distinction
+carries the gravest consequences for data.
 
 \subsection{Research Objective and Thesis Structure}
 
-This thesis investigates the performance differences between two autoscaling strategies
-for stateful applications deployed in a Kubernetes cluster managed by K3s. The first
-strategy employs the native Horizontal Pod Autoscaler in a \textit{reactive} configuration,
-scaling a Redis Cluster in response to CPU and memory resource expenditure. The second
-strategy employs a \textit{custom KEDA-based operator} in a predictive, event-driven
-configuration, triggering scaling decisions based on application-level metrics sourced
-from a Prometheus observability stack.
+The title of this thesis---\textit{Pods Are Not Shards}---names the gap identified above:
+a Kubernetes pod is a unit of \textit{scheduling}, whereas a Redis shard is a unit of
+\textit{data ownership}, and the two coincide only for as long as the cluster's topology
+remains undisturbed. This thesis investigates what happens when that topology is disturbed
+in the most consequential way---by removing a master during a planned scale-in---and poses
+a single, precise question: does a planned, one-master scale-in of a sharded Redis Cluster
+preserve all \num{16384} hash slots together with every stored key, and to what extent does
+the answer depend on the mechanism that carries the removal out?
 
-The experimental infrastructure consists of a FastAPI-based entrypoint service
-(\cite{fastapi:docs}), a Redis Cluster with a minimum of three nodes, an observability
-stack comprising Prometheus and Grafana deployed via Helm, and two scaling
-configuration manifests representing the naive HPA and KEDA-driven approaches
-respectively. All components are deployed on a K3s cluster, providing a reproducible
-and resource-constrained environment representative of real-world edge and on-premises
-deployments.
+To answer this question, the thesis conducts an empirical, controlled comparison of the two
+mechanisms by which such a removal can occur. The first is the native Kubernetes path, in
+which a \texttt{StatefulSet} is simply contracted---the precise action that the HPA performs
+on scale-down---deleting a pod by ordinal with no awareness of the hash slots it owns. The
+second is the operator path, in which the Opstree Redis Operator, having encoded
+Redis-specific domain knowledge into a Kubernetes controller, drains the departing master by
+migrating its slots to the survivors before the pod is removed
+(\cite{opstree:redisoperator}; \cite{k8s:operator}). The dependent variable throughout is
+\textit{data loss}---the number of keys lost and the number of hash slots left permanently
+uncovered---rather than the responsiveness or autonomy of any autoscaler.
 
-The remainder of this thesis is structured as follows. Chapter ~\ref{sec:stateful-vs-stateless} details the differences between the automatic provisioning of stateless and stateful applications, a well as the issues that arise when scaling stateful workloads. Chapter~\ref{sec:technologies} provides the theoretical background on Kubernetes architecture, autoscaling mechanisms,
-stateful workloads, and the Redis Cluster model. Chapter~\ref{sec:architecture} describes the
-system design and experimental setup. Chapter~\ref{sec:results} presents the
-experimental results and performance analysis. Chapter~\ref{sec:conclusion} summarises the
-findings and discusses directions for future work.
+A deliberate methodological choice underpins the comparison. So that the outcome can be
+attributed to the scaling mechanism alone, the experiment is conducted under strictly
+quiescent conditions: a known, exact dataset is written directly into the cluster, after
+which exactly one master is removed, with no client load, no application entrypoint, and no
+autoscaler controller in the loop. This isolation eliminates the dominant confound---write
+pressure interrupting a live reshard---and renders the result deterministic and
+reproducible. The event-driven triggering of scaling decisions, including the use of
+\ac{KEDA} and application-level Prometheus metrics, together with the behaviour of the
+system under sustained load, are orthogonal to the data-safety question examined here and
+are accordingly treated as background and as directions for future work rather than as
+variables under test.
+
+The experimental infrastructure is correspondingly lean. It comprises a Redis Cluster
+deployed in two interchangeable configurations---a self-managed cluster assembled from
+native primitives and an operator-managed cluster declared through a custom resource---together
+with an observability stack of Prometheus and Grafana on which the before-and-after slot and
+key metrics are captured. All components run on a K3s cluster distributed across
+resource-constrained mini-PCs, providing a reproducible environment representative of
+real-world edge and on-premises deployments (\cite{k3s:docs}).
+
+The remainder of this thesis is structured as follows. Chapter~\ref{sec:stateful-vs-stateless}
+examines the distinction between scaling stateless and stateful workloads and the specific
+hazards that arise when a sharded store is scaled. Chapter~\ref{sec:technologies} provides the
+theoretical background on Kubernetes, the \texttt{StatefulSet} primitive, the operator pattern,
+and the Redis Cluster model. Chapter~\ref{sec:architecture} describes the system design and
+experimental testbed, and Chapter~\ref{sec:test-flow} sets out the controlled procedure that
+exercises it. Chapter~\ref{sec:results} presents the experimental results and their analysis,
+and Chapter~\ref{sec:conclusion} summarises the findings and discusses directions for future
+work.

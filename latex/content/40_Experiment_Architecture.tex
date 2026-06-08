@@ -1,35 +1,95 @@
 \newpage
+\section{Experiment Architecture}
+\label{sec:architecture}
+
+This section describes the architecture of the experimental testbed once it has been
+reduced to the minimum required in order to observe a planned scale-in in isolation.
+Because the study deliberately excludes live load, an application entrypoint, and any
+autoscaler controller (Section~\ref{sec:test-flow}), the architecture is correspondingly
+lean: every component resides inside a single Kubernetes cluster, and the experiment is
+driven not by external traffic but by a control script that writes a known dataset, removes
+exactly one master, and reads back the result. The two mechanisms under
+investigation---the native StatefulSet contraction that reproduces the Horizontal Pod
+Autoscaler's scale-down action, and the Opstree Redis Operator's topology-aware
+drain---are realised as two mutually exclusive, interchangeable data-tier modules within an
+otherwise identical environment, so that any measured difference can be attributed solely
+to the scaling mechanism. The procedure that exercises this architecture is presented
+separately in Section~\ref{sec:test-flow}, and the conceptual description of each individual
+technology is given in Section~\ref{sec:technologies}.
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=1\linewidth]{assets/images/high-level-architecture-overview-graph.jpg}
+    \caption{High-level overview of the testbed.}
+    \label{fig:architecture-overview}
+\end{figure}
+
 % ============================================================
-%  SECTION: Experiment Architecture and Test Flow
+\subsection{Physical Substrate: the K3s Cluster}
+\label{subsec:cluster-substrate}
 % ============================================================
 
-\section{Experiment Architecture and Test Flow}
-This chapter details the architecture of the experimental testbed and the procedural flow employed to evaluate the data safety characteristics of stateful scaling mechanisms. To rigorously isolate the fundamental mechanical differences between native Kubernetes scaling and topology-aware operator-driven scaling, the experimental design eschews dynamic, load-driven autoscaling triggers in favor of a quiescent, deterministic proof of concept. By explicitly removing external load generators, application entrypoints, and automated metric evaluations, the experiment eliminates confounding variables---such as network saturation, connection tracking limits, or resharding interruptions caused by live writes---thereby distilling the evaluation entirely down to the preservation of data integrity and cluster availability during a scale-in event.
+The cluster is a k3s distribution running on six mini-PCs (four-core CPU, 8\,GB
+RAM each), one acting as a combined control-plane and worker node and the remaining five as
+workers (\cite{k3s:docs}). k3s is chosen for its small footprint on resource-constrained
+hardware while remaining fully API-conformant. The in-cluster components are organised into
+three Kubernetes namespaces, which also structure the subsections below: \texttt{redis} (the
+stateful data tier together with both scaling configurations), \texttt{ot-operators} (the
+Opstree Redis Operator that the operator scenario depends upon), and \texttt{monitoring}
+(the observability stack on which the results are captured). Because the experiment operates
+on four masters before contracting to three, the leader anti-affinity described below is able
+to place each master on a distinct physical node.
 
-\subsection{System Architecture}
-\label{subsec:architecture-system}
+% ------------------------------------------------------------
+\subsection{The Experiment Driver}
+\label{subsec:driver}
+% ------------------------------------------------------------
 
-The underlying infrastructure consists of a lightweight Kubernetes distribution, \texttt{k3s}, deployed across a physically distributed cluster of six resource-constrained mini-PCs (\cite{k3s:docs}). These hardware constraints model a realistic edge or on-premises environment where efficient resource reclamation is critical. Unlike dynamic scenarios that require external load injection routing through \texttt{NodePort} services, this quiescent architecture operates entirely within the cluster boundaries.
+In place of the external load generator and application entrypoint of a conventional
+benchmarking harness, the sole driver of this testbed is a single control script,
+\texttt{data-safety-experiment.sh}, executed on the control-plane node with its
+\texttt{KUBECONFIG} pointed at the local k3s configuration. The script orchestrates the
+entire run through \texttt{k3s kubectl}, \texttt{helm}, and \texttt{redis-cli} invoked via
+\texttt{kubectl exec} into the surviving ordinal-$0$ leader pod. Crucially, there is no
+FastAPI entrypoint, no \texttt{k6} load generator, and neither an HPA nor a KEDA controller
+acting on the cluster; the script instead reproduces by hand the precise scale-down action
+that each autoscaler would otherwise perform. Because that script is the only process that
+ever writes to Redis, the data tier is quiescent throughout, and the measured outcome is
+therefore a deterministic property of the scaling mechanism rather than of any incidental
+traffic.
 
-The architecture comprises two mutually exclusive data tier deployments, which represent the primary independent variable of the experiment:
-\begin{itemize}
-    \item \textbf{Native Primitives (HPA Scenario):} The Redis Cluster is assembled manually using foundational Kubernetes resources. A \texttt{StatefulSet} manages the pod lifecycle, utilizing a headless \texttt{Service} to provide stable network identities for intra-cluster communication (\cite{k8s:statefulset}). Because the declarative \texttt{StatefulSet} manifest cannot express the topological geometry of a Redis Cluster, the hash slots and master-replica assignments must be imperatively configured via the \texttt{redis-cli} binary during initialization (\cite{redis:clusterspec}).
-    \item \textbf{Operator Pattern (KEDA Scenario):} The data tier is deployed declaratively using the Opstree Redis Operator (\cite{opstree:redisoperator}). The operator's custom controller resides within the cluster and continuously watches a \texttt{RedisCluster} Custom Resource, autonomously translating the requested \texttt{clusterSize} parameter into underlying \texttt{StatefulSet} modifications, \texttt{CLUSTER MEET} commands, and coordinated hash slot migrations.
-\end{itemize}
+% ------------------------------------------------------------
+\subsection{The \texttt{redis} Namespace: Stateful Data Tier and Scaling Configurations}
+\label{subsubsec:ns-redis}
+% ------------------------------------------------------------
 
-To provide continuous, objective telemetry during the scaling transitions, a unified observability stack is deployed via the \texttt{kube-prometheus-stack} Helm chart. Prometheus scrapes the cluster-state metrics directly from the \texttt{redis-cli} processes and exporter sidecars, while Grafana visualizes the exact sequence of topological changes, slot allocations, and data retention metrics.
+The \texttt{redis} namespace contains the stateful data tier and the manifests for both
+scaling scenarios. Only one scenario is ever active at a time; the setup script scorches the
+namespace between runs. A Redis Cluster partitions its key space into $16{,}384$ hash slots
+distributed across master nodes (\cite{redis:clusterspec}), and the two scenarios differ
+precisely in \emph{who} manages those slots when the master count changes.
 
-\subsection{Configuration Manifests}
-\label{subsec:architecture-manifests}
+\paragraph{HPA scenario (self-managed cluster).}
+Here the cluster is assembled from native Kubernetes primitives. A \texttt{ConfigMap}
+supplies a minimal \texttt{redis.conf} with \texttt{cluster-enabled yes}; a headless
+\texttt{Service} (\texttt{clusterIP: None}) gives each pod a stable DNS identity; and a
+\texttt{StatefulSet} runs Redis with an \texttt{oliver006} exporter sidecar on port
+\texttt{9121} (Listing~\ref{lst:redis-statefulset}). Although the manifest declares six
+replicas, the data-safety experiment scales the StatefulSet to \texttt{START\_MASTERS} pods
+and forms a \emph{masters-only} cluster imperatively with
+\texttt{redis-cli -{}-cluster create} (deliberately omitting \texttt{-{}-cluster-replicas}, so
+that the cliff is exposed without a replica to mask it); the topology that a
+\texttt{StatefulSet} manifest cannot itself express is therefore assigned at runtime
+(\cite{k8s:statefulset,redis:clusterspec}). The per-pod CPU requests that the manifest
+annotates as serving an HPA's utilisation calculation (\cite{k8s:hpa}) are simply unused in
+this isolated run, since no autoscaler is deployed; the scale-in is instead driven by hand.
+A \texttt{ServiceMonitor} (Listing~\ref{lst:servicemonitor-hpa}) wires the exporter into
+Prometheus.
 
-To instantiate the environments described above, the experiment relies on declarative YAML manifests. Listing~\ref{lst:hpa-cluster} details the baseline native Kubernetes configuration, explicitly demonstrating the lack of topological awareness in a standard \texttt{StatefulSet}. Listing~\ref{lst:operator-values} displays the Helm values utilized to configure the Opstree Redis Operator, showcasing the abstraction of cluster sizing and exporter injection.
-
-\begin{lstlisting}[caption={Kubernetes manifests for the native HPA Redis scenario (\texttt{redis-hpa-cluster.yaml}).},label={lst:hpa-cluster}]
+\begin{lstlisting}[caption={Redis \texttt{ConfigMap}, headless \texttt{Service}, and \texttt{StatefulSet} (\texttt{redis-hpa-cluster.yaml}).},label={lst:redis-statefulset}]
 apiVersion: v1
 kind: ConfigMap
-metadata:
-  name: redis-min-config
-  namespace: redis
+metadata: { name: redis-min-config, namespace: redis }
 data:
   redis.conf: |
     cluster-enabled yes
@@ -42,149 +102,202 @@ kind: Service
 metadata:
   name: redis-headless
   namespace: redis
-  labels:
-    app: redis
+  labels: { app: redis }
 spec:
-  clusterIP: None
+  clusterIP: None                 # headless: per-pod DNS for slot-aware routing
   ports:
-    - port: 6379
-      name: redis
-    - port: 16379
-      name: gossip
-    - port: 9121
-      name: metrics
-  selector:
-    app: redis
+    - { port: 6379,  name: redis }
+    - { port: 16379, name: gossip }
+    - { port: 9121,  name: metrics }
+  selector: { app: redis }
 ---
 apiVersion: apps/v1
 kind: StatefulSet
-metadata:
-  name: redis
-  namespace: redis
+metadata: { name: redis, namespace: redis }
 spec:
   serviceName: redis-headless
-  # 6 pods = 3 masters + 3 replicas. The master/replica ROLES are assigned at runtime by the
-  # setup script's `redis-cli --cluster create --cluster-replicas 1` - a vanilla StatefulSet
-  # cannot express "pod X replicates pod Y", which is exactly the topology gap the operator
-  # closes declaratively. The HPA's minReplicas is pinned to 6 (see redis-hpa-scaling.yaml) so
-  # it won't scale the StatefulSet down to 3 while idle and strip the replicas before the test.
-  replicas: 6
+  replicas: 6                      # experiment scales this to START_MASTERS and forms masters-only
   selector:
-    matchLabels:
-      app: redis
+    matchLabels: { app: redis }
   template:
     metadata:
-      labels:
-        app: redis
+      labels: { app: redis }
     spec:
       containers:
         - name: redis
           image: redis:7.2-alpine
           command: ["redis-server", "/etc/redis/redis.conf"]
           resources:
-            ## Base requests are strictly required for HPA to calculate usage percentages
-            requests:
-              cpu: "100m"
-              memory: "128Mi"
+            requests: { cpu: "100m", memory: "128Mi" }
           volumeMounts:
-            - name: conf
-              mountPath: /etc/redis
+            - { name: conf, mountPath: /etc/redis }
         - name: redis-exporter
           image: ghcr.io/oliver006/redis_exporter:latest
           ports:
-          - containerPort: 9121
-            name: metrics
+            - { containerPort: 9121, name: metrics }
           env:
-          # Since it's a sidecar, it can reach the main Redis container via localhost
-          - name: REDIS_ADDR
-            value: "redis://localhost:6379"
-          resources: 
-            requests:
-              cpu: "50m"
-              memory: "64Mi"
+            - { name: REDIS_ADDR, value: "redis://localhost:6379" }
+          resources:
+            requests: { cpu: "50m", memory: "64Mi" }
       volumes:
         - name: conf
-          configMap:
-            name: redis-min-config
+          configMap: { name: redis-min-config }
 \end{lstlisting}
 
-\begin{lstlisting}[caption={Helm values configuring the Opstree Redis Operator (\texttt{redis-operator-cluster-values.yaml}).},label={lst:operator-values}]
+\begin{lstlisting}[caption={\texttt{ServiceMonitor} for the HPA scenario exporter (\texttt{redis-servicemonitor.yaml}).},label={lst:servicemonitor-hpa}]
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: redis-monitor
+  namespace: redis
+  labels: { release: prometheus }  # adopted by kube-prometheus-stack
+spec:
+  selector:
+    matchLabels: { app: redis }
+  endpoints:
+    - { port: metrics, interval: 15s }
+\end{lstlisting}
 
+\paragraph{Operator scenario (operator-managed cluster).}
+Here the data tier is declared rather than assembled. The Opstree Redis Operator is given a
+desired \texttt{clusterSize} through its \texttt{RedisCluster} custom resource, and the
+operator creates the leader and follower \texttt{StatefulSet}s, forms the cluster, and---most
+importantly for this study---reshards slots when the size changes
+(\cite{k8s:operator,opstree:redisoperator}). The resource is deployed via the operator's Helm
+chart, configured by the values file in Listing~\ref{lst:operator-values}: the baseline
+\texttt{clusterSize} of $3$ is overridden to \texttt{START\_MASTERS} at deploy time with a
+\texttt{-{}-set} flag, the leader and follower replica counts are left unset so that
+\texttt{clusterSize} alone drives the master count, leader anti-affinity spreads masters
+across nodes, and the same \texttt{oliver006} exporter is enabled for metric parity with the
+HPA scenario. In this isolated experiment the size is changed directly, by patching the
+custom resource, rather than by an event-driven KEDA trigger. As in the HPA scenario, a
+standalone \texttt{ServiceMonitor} (Listing~\ref{lst:servicemonitor-operator}) is required,
+because neither the operator nor the chart flag creates one.
+
+\begin{lstlisting}[caption={Opstree Helm values producing the \texttt{RedisCluster} (\texttt{redis-operator-cluster-values.yaml}).},label={lst:operator-values}]
 redisCluster:
-  clusterSize: 3
-  # IMPORTANT: do NOT override this with the vanilla redis image. The Opstree operator
-  # depends on its OWN image's entrypoint (quay.io/opstree/redis) to enable cluster mode
-  # (cluster-enabled yes). A plain redis:7.2-alpine boots in STANDALONE mode, so redis-py
-  # fails with "Cluster mode is not enabled on this node" and the entrypoint never connects.
-  # We therefore use the chart's default Opstree image; the minor version delta vs the HPA
-  # scenario's redis:7.2 is an acceptable, documented trade-off for a working cluster.
+  clusterSize: 3                   # overridden to START_MASTERS via --set at deploy time
+  persistenceEnabled: false        # ephemeral, matching the HPA scenario
   resources:
-    requests:
-      cpu: "100m"
-      memory: "128Mi"
-    limits:
-      cpu: "250m"
-      memory: "256Mi"
+    requests: { cpu: "100m", memory: "128Mi" }
+    limits:   { cpu: "250m", memory: "256Mi" }
   leader:
-    # Un-pin leader replicas so clusterSize (driven by KEDA) controls the master count.
-    replicas: null
+    replicas: null                 # null => clusterSize drives the master count
     affinity:
-      podAntiAffinity:
-        # Preferred (not required) so a scale-out to 4-6 masters can't get stuck Pending
-        # if a node is momentarily unschedulable - the scheduler still spreads leaders
-        # one-per-node when it can. weight 100 = strongest preference.
+      podAntiAffinity:             # prefer one master per node
         preferredDuringSchedulingIgnoredDuringExecution:
         - weight: 100
           podAffinityTerm:
             labelSelector:
-              matchLabels:
-                app: redis-cluster-leader
+              matchLabels: { app: redis-cluster-leader }
             topologyKey: kubernetes.io/hostname
-
-  # Same un-pin for followers, so clusterSize drives the whole cluster symmetrically.
   follower:
     replicas: null
-
-# Exporter sidecar: source of redis_keyspace_hits_total / _misses_total that KEDA's
-# cache-miss-ratio trigger reads. Mirrors the oliver006 exporter used in the HPA
-# scenario for identical metric semantics.
 redisExporter:
   enabled: true
   image: ghcr.io/oliver006/redis_exporter
   tag: latest
   resources:
-    requests:
-      cpu: "50m"
-      memory: "64Mi"
-
-serviceMonitor:
+    requests: { cpu: "50m", memory: "64Mi" }
+serviceMonitor:                    # chart flag is a no-op here; see standalone SM below
   enabled: true
   interval: 15s
-  scrapeTimeout: 10s
-  extraLabels:
-    release: prometheus
+  extraLabels: { release: prometheus }
 \end{lstlisting}
 
-\subsection{Experimental Test Flow}
-\label{subsec:architecture-flow}
+\begin{lstlisting}[caption={Standalone \texttt{ServiceMonitor} for the operator's exporters (\texttt{redis-servicemonitor.yaml}).},label={lst:servicemonitor-operator}]
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: redis-operator-monitor
+  namespace: redis
+  labels: { release: prometheus }
+spec:
+  selector:                        # selects both leader-metrics and follower-metrics services
+    matchLabels:
+      app.kubernetes.io/component: metrics
+      redis_setup_type: cluster
+  endpoints:
+    - { port: redis-exporter, interval: 15s }
+\end{lstlisting}
 
-The empirical evaluation is driven by an automated, deterministic execution pipeline (\texttt{data-safety-experiment.sh}) designed to enforce identical baseline conditions across both experimental scenarios. The pipeline advances through five strict, verifiable phases:
+% ------------------------------------------------------------
+\subsection{The \texttt{ot-operators} Namespace: the Redis Operator}
+\label{subsubsec:ns-operator}
+% ------------------------------------------------------------
 
-\paragraph{Phase 1: Deterministic Environment Initialization.}
-To guarantee that residual state from prior executions does not contaminate the findings, every test iteration begins with a comprehensive environment purge. The pipeline systematically uninstalls all Helm releases, deletes the relevant Kubernetes namespaces, and destroys all \texttt{PersistentVolumeClaims} associated with the Redis workloads. The execution halts until Kubernetes confirms the absolute termination of all prior resources, ensuring a sterile baseline.
+The operator scenario depends on a single cluster-wide controller that is installed once, via
+Helm, and shared across runs; it is not redeployed by the per-experiment script. The
+\texttt{ot-operators} namespace runs the Opstree Redis Operator, a custom controller that
+watches \texttt{RedisCluster} resources and reconciles them into running clusters, encoding
+the Redis-specific domain knowledge---cluster formation, slot assignment, and topology-aware
+resharding---that Kubernetes' generic primitives lack (\cite{k8s:operator}). It is precisely
+this controller that performs the graceful drain measured in the operator scenario, migrating
+a departing master's slots to the survivors before the pod is removed. Notably, KEDA plays no
+part in this isolated experiment: because the scale-in is triggered by directly patching the
+\texttt{clusterSize} field rather than by an application-level metric, no event-driven
+autoscaling layer is installed. The HPA scenario, in turn, uses no controller of any kind;
+its scale-in is the bare StatefulSet contraction that the control script issues by hand.
 
-\paragraph{Phase 2: Baseline Provisioning and Geometry Validation.}
-The designated data tier is deployed and configured to form a four-node cluster consisting exclusively of master nodes, deliberately omitting replicas to ensure that any topological failure directly manifests as a measurable data cliff rather than being temporarily masked by high-availability failover mechanisms. In the native primitive scenario, the \texttt{StatefulSet} is scaled to four, and the \texttt{redis-cli --cluster create} command is executed to allocate $4{,}096$ hash slots to each node. In the operator scenario, the \texttt{RedisCluster} resource is applied with a \texttt{clusterSize} of four, delegating the cluster formation to the custom controller. The pipeline subsequently polls the primary node until the cluster explicitly reports a \texttt{cluster\_state:ok} status with all $16{,}384$ hash slots successfully covered.
+% ------------------------------------------------------------
+\subsection{The \texttt{monitoring} Namespace: Observability and Capture}
+\label{subsubsec:ns-monitoring}
+% ------------------------------------------------------------
 
-\paragraph{Phase 3: Quiescent Data Population.}
-Following the successful validation of the cluster geometry, the pipeline injects a highly deterministic, verifiable dataset. Utilizing the \texttt{redis-cli} binary acting as the sole writer within the cluster, exactly \num{5000} distinct keys are populated sequentially. Because the workload utilizes standard key distributions without hash tags, the dataset is uniformly striped across all four master nodes. The absence of any concurrent read or write traffic guarantees that the cluster enters the subsequent scaling phase in a perfectly quiescent, stable state.
+The \texttt{monitoring} namespace hosts the observability stack, deployed once from the
+\texttt{kube-prometheus-stack} Helm chart, which bundles Prometheus and Grafana
+(\cite{artifacthub:kube-prometheus-stack}). It is identical across both experimental
+conditions. The values overrides are shown in Listing~\ref{lst:prometheus-values}:
+control-plane scrape jobs that do not apply to a k3s distribution are disabled, and both
+Prometheus and Grafana are exposed via \texttt{NodePort}. Prometheus discovers its scrape
+targets through the \texttt{ServiceMonitor} resources defined in the \texttt{redis} namespace
+(Listings~\ref{lst:servicemonitor-hpa} and~\ref{lst:servicemonitor-operator}), which point it
+at the Redis exporters (\cite{prometheus:overview}). Those exporters expose the slot- and
+key-level series---most importantly \texttt{redis\_cluster\_slots\_assigned} and
+\texttt{redis\_db\_keys}---on which Grafana (\cite{grafana:github}) renders the before-and-after
+panels that document each scale-in. The \texttt{enableRemoteWriteReceiver} flag, originally
+provisioned so that an off-cluster generator could push client-side metrics, is inert in this
+isolated configuration but has been left in place as a harmless default.
 
-\paragraph{Phase 4: Controlled Scale-In Execution.}
-To isolate the execution mechanism from the latency and heuristic variations of an active autoscaler, the scaling trigger is invoked imperatively. This phase directly simulates the exact system calls that the HPA or KEDA controllers would generate when commanding a downscale from four nodes to three:
-\begin{itemize}
-    \item \textbf{In the native scenario:} The \texttt{StatefulSet} replica count is patched from four to three, triggering Kubernetes to terminate the highest-ordinal pod (\texttt{redis-3}) in strict accordance with reverse-ordinal deletion rules (\cite{k8s:statefulset}).
-    \item \textbf{In the operator scenario:} The \texttt{clusterSize} parameter within the \texttt{RedisCluster} resource is patched from four to three, prompting the operator's reconciliation loop to orchestrate a data drain prior to pod termination.
-\end{itemize}
+\begin{lstlisting}[caption={\texttt{kube-prometheus-stack} Helm values (\texttt{my-prometheus-values.yaml}).},label={lst:prometheus-values}]
+kubeControllerManager: { enabled: false }   # not exposed by k3s
+kubeEtcd:              { enabled: false }
+kubeProxy:            { enabled: false }
+kubeScheduler:        { enabled: false }
+grafana:
+  service: { type: NodePort }
+prometheus:
+  service: { type: NodePort }
+  prometheusSpec:
+    enableRemoteWriteReceiver: true          # inert here; retained as a harmless default
+\end{lstlisting}
 
-\paragraph{Phase 5: Integrity Verification and Telemetry Capture.}
-Immediately following the successful termination of the target pod, the pipeline issues a cluster state verification request to the surviving primary node. The experiment programmatically records the updated \texttt{cluster\_state}, the total number of successfully assigned hash slots, and the surviving key count. To actively verify availability, the pipeline issues read probes against specific keys distributed throughout the keyspace, monitoring for \texttt{CLUSTERDOWN} errors that indicate a compromised topological state resulting from orphaned slots.
+% ============================================================
+\subsection{End-to-End Measurement Flow}
+\label{subsec:data-flow}
+% ============================================================
+
+Bringing the layers together, a single experimental run traverses the following path, which
+replaces the request-driven path of a load-tested system with a measurement-driven one:
+
+\begin{enumerate}
+    \item The control script populates a known, exact dataset by executing
+    \texttt{redis-cli} inside the ordinal-$0$ leader pod, writing every key directly; as the
+    only writer, it leaves the cluster quiescent.
+    \item The script records the \emph{before} snapshot, reading \texttt{cluster\_state} and
+    \texttt{cluster\_slots\_ok} from \texttt{redis-cli cluster info} and the key total from
+    \texttt{redis-cli -{}-cluster check}.
+    \item The script triggers the one-master scale-in, either by contracting the StatefulSet
+    (HPA scenario) or by patching \texttt{clusterSize} on the custom resource (operator
+    scenario), thereby invoking the operator's reshard.
+    \item The script records the \emph{after} snapshot and issues a direct read probe, whose
+    response under the default \texttt{cluster-require-full-coverage} policy is effectively
+    binary.
+    \item Throughout, the exporter sidecars expose the cluster metrics, which Prometheus
+    scrapes on its interval; Grafana queries Prometheus and renders the slot- and key-level
+    series, providing the panels recorded in Section~\ref{sec:results}.
+\end{enumerate}
+
+Every component on this path other than the data-tier module in step~3 is held constant
+across the two experimental conditions, so that the comparison in Section~\ref{sec:results}
+isolates the scaling mechanism.

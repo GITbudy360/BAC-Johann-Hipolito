@@ -1,62 +1,159 @@
 \newpage
-% ============================================================
-%  SECTION: Results and Analysis
-% ============================================================
-\newpage
 \section{Results and Analysis}
 \label{sec:results}
 
-This chapter presents the empirical findings of the data-safety experiment. To isolate the mechanical differences between native Kubernetes scaling and operator-driven scaling, the evaluation was conducted under quiescent conditions (zero external write pressure). A deterministic baseline was established for both scenarios: a Redis Cluster deployed with four primary master nodes and exactly \num{5000} keys uniformly distributed across the keyspace. The independent variable is the mechanism used to scale the cluster inward from four masters to three.
-
-\subsection{Scenario A: Native HPA Scale-In and the Data Cliff}
-\label{subsec:results-hpa}
-
-In the native Horizontal Pod Autoscaler (HPA) scenario, the scaling action was triggered by directly reducing the \texttt{StatefulSet} replica count from four to three. This mirrors the exact operational instruction an HPA controller issues when resource utilisation falls below its target threshold.
-
-Because Kubernetes \texttt{StatefulSets} terminate pods in strictly descending ordinal order (\cite{k8s_statefulsets}), the scheduler immediately issued a termination signal to the highest-ordinal pod (\texttt{redis-3}). The native Kubernetes primitives possess no awareness of the Redis hash slot topology; consequently, the pod was terminated without initiating a \texttt{CLUSTER MEET} or migrating its assigned hash slots to the surviving nodes.
-
-As recorded in the test output, the instantaneous removal of \texttt{redis-3} triggered a catastrophic data cliff:
-\begin{itemize}
-    \item \textbf{Slot Orphanage:} Cluster hash slot coverage fell immediately from \num{16384} to \num{12288}, leaving \num{4096} slots permanently orphaned.
-    \item \textbf{Data Loss:} The total key count dropped from \num{5000} to \num{3750}. Exactly \num{1250} keys (25\% of the dataset, correlating directly to the loss of one out of four evenly balanced nodes) were permanently deleted.
-    \item \textbf{Availability:} The read probes executed immediately following the pod deletion resulted in a 100\% failure rate. Because the cluster fell below the full \num{16384} slot coverage requirement, Redis transitioned into a \texttt{CLUSTERDOWN} state, refusing all subsequent read and write traffic (\cite{redis_cluster_spec}).
-\end{itemize}
-
-These results validate the hypothesis that native Kubernetes scaling primitives provision and terminate compute capacity but are structurally incapable of integrating or safely decommissioning stateful topology. 
-
+This chapter presents and interprets the outcome of the controlled scale-in experiment
+described in Section~\ref{sec:test-flow}, in which a four-master Redis Cluster was contracted
+to three masters under perfectly quiescent conditions---once by the native StatefulSet
+mechanism that reproduces the Horizontal Pod Autoscaler's scale-down action, and once by the
+topology-aware mechanism of the Opstree Redis Operator. For each mechanism the analysis rests
+on the same three authoritative quantities, captured immediately before and immediately after
+the removal of a single master: the reported cluster state, the number of covered hash slots,
+and the total number of stored keys, supplemented by a five-key read probe whose behaviour
+under the cluster's default \texttt{cluster-require-full-coverage} policy provides a direct,
+binary test of end-to-end availability. Because both runs began from an identically populated
+and verified baseline---\texttt{cluster\_state:ok}, all \num{16384} slots covered, and exactly
+\num{5000} keys present---any divergence in the after-state can be attributed without
+ambiguity to the scaling mechanism alone, and it is on that divergence that the following
+analysis is built.
 
 \begin{figure}
     \centering
     \includegraphics[width=\textwidth]{assets/images/hpa_scale_in.png}
-    \caption{Timeline of the HPA scale-in event. The vertical red line indicates the moment the \texttt{StatefulSet} replica count was reduced from four to three, triggering the deletion of \texttt{redis-3}. The subsequent drop in total keys and hash slot coverage is visible, along with the spike in read errors due to cluster unavailability.}
-    \label{fig:hpa_scale_in}
+    \caption{Grafana capture of the HPA scenario's one-master scale-in.}
 \end{figure}
 
+\subsection{Scenario A: The Native StatefulSet (HPA) Mechanism}
 
-\subsection{Scenario B: Operator-Driven Graceful Scale-In}
-\label{subsec:results-operator}
+Upon the removal of the highest-ordinal pod, \texttt{redis-3}, the cluster underwent an
+immediate and irreversible collapse of its data plane. Because the four masters had been
+formed with equal slot ranges of \num{4096} slots each and---by deliberate design---without
+replicas, the departure of \texttt{redis-3} left its entire \num{4096}-slot range with no
+owner and no candidate for promotion, so that the cluster's covered-slot count fell from
+\num{16384} to \num{12288}, a loss of precisely one quarter of the keyspace, while
+\texttt{cluster\_state} transitioned from \texttt{ok} to \texttt{fail} (\cite{redis:clusterspec}).
+The consequences for stored data followed directly: the keys that had hashed into the orphaned
+range---approximately \num{1250}, in keeping with the roughly uniform distribution of the
+\num{5000}-key dataset across the slot space---became permanently unreachable, and the
+\emph{after} key total reported by \texttt{redis-cli -{}-cluster check} dropped commensurately.
+The read probe rendered the severity of this outcome in the starkest possible terms: under the
+default \texttt{cluster-require-full-coverage} policy, a single uncovered slot causes the
+cluster to refuse \emph{all} reads, so that every one of the five probed keys---including those
+whose slots remained perfectly intact on the surviving masters---returned a \texttt{CLUSTERDOWN}
+error. The cluster did not degrade in proportion to the lost capacity; it ceased to serve
+altogether.
 
-In the operator scenario, the scale-in was executed by patching the \texttt{clusterSize} parameter of the \texttt{RedisCluster} Custom Resource from four down to three. This mirrors the exact action taken by a KEDA \texttt{ScaledObject} triggering a downscale event.
 
-Rather than immediately terminating a pod, the Opstree Redis Operator intercepted the state change. The operator's reconciliation loop identified the required topological shift and initiated a live resharding process, draining the \num{4096} hash slots from the target node and redistributing them evenly among the three surviving masters (\cite{opstree_redis}). Only after the cluster achieved consensus that the departing node held zero slots did the operator delete the underlying \texttt{StatefulSet} pod.
 
-The test output confirms a fully graceful scale-in:
-\begin{itemize}
-    \item \textbf{Slot Integrity:} Hash slot coverage remained at \num{16384} throughout and after the scaling event.
-    \item \textbf{Data Preservation:} The cluster retained all \num{5000} keys with zero data loss.
-    \item \textbf{Availability:} The read probes executed following the scale-in recorded zero \texttt{CLUSTERDOWN} errors, confirming that cluster availability was maintained continuously. 
-\end{itemize}
-
-\subsection{Synthesis of Findings}
-\label{subsec:results-synthesis}
-
-The stark contrast between the two scenarios empirically proves the necessity of the operator pattern for stateful workloads. The native HPA pathway demonstrates that allowing a generic infrastructure controller to manage database lifecycle operations results in guaranteed data loss and cluster unavailability. 
-
-While the operator successfully bridged the gap between compute provisioning and data topology, it is important to note that this success was recorded under quiescent conditions. As established in the methodology, the operator's live resharding logic remains vulnerable to interruption if subjected to heavy concurrent write pressure (\cite{redis_admin}). Nevertheless, when evaluating pure architectural capability, the operator pattern is the only evaluated mechanism that possesses the domain knowledge required to safely perform a stateful scale-in.
+This result confirms the hypothesis of a structural \emph{data cliff} advanced in
+Section~\ref{subsec:flow-hpa}. The decisive observation is that the loss occurred under zero
+client load, a fact that excludes any explanation in terms of write pressure, request races,
+or unfortunate timing and establishes the cause as purely mechanical: the StatefulSet
+contraction deletes a pod by ordinal with no knowledge whatsoever of the slots that pod owns,
+performing neither a drain nor a reshard, so that the departing master's slots are not migrated
+but simply abandoned (\cite{k8s:statefulset}). It is worth emphasising that the masters-only
+topology was chosen precisely to expose this mechanism in isolation; had replicas been present,
+native failover would have promoted a replica and thereby \emph{delayed} the cliff, but it
+could not have \emph{prevented} it, because a planned scale-in fundamentally requires the
+deliberate migration of slots that no native Kubernetes primitive performs.
 
 \begin{figure}
     \centering
     \includegraphics[width=\textwidth]{assets/images/operator_scale_in.png}
-    \caption{Timeline of the operator-driven scale-in event. The vertical blue line indicates the moment the \texttt{clusterSize} parameter was patched from four to three. The graph shows that total keys and hash slot coverage remained stable throughout the resharding process, and no read errors were recorded, confirming continuous availability.}
-    \label{fig:operator_scale_in}
+    \caption{Grafana capture of the operator scenario's one-master scale-in.}
 \end{figure}
+
+\subsection{Scenario B: The Operator Mechanism}
+
+When the same transition was requested of the operator-managed cluster---by lowering the
+custom resource's \texttt{clusterSize} from four to three---the outcome was qualitatively
+different. The operator responded not by deleting a pod outright but by first draining the
+departing master, migrating its slots to the three surviving masters, and only then removing
+the now-empty node; in consequence the covered-slot count never left \num{16384},
+\texttt{cluster\_state} remained \texttt{ok} throughout the transition, and the \emph{after}
+key total was identical to the \emph{before} total, indicating that not a single key had been
+lost. The read probe corroborated this from the client's perspective, returning all five
+probed keys without error and thereby confirming that full coverage---and, under the
+require-full-coverage policy, therefore full availability---had been preserved from start to
+finish (\cite{redis:scaling,opstree:redisoperator}).
+
+% TODO: insert the Grafana capture for the operator run here -- the contrasting panel on which
+% redis_cluster_slots_assigned stays pinned at 16384 and sum(redis_db_keys) holds flat across
+% the entire scale-in.
+
+This preservation of data was not, however, unconditional or free of cost. The operator
+possesses no self-healing capability for a reshard that is interrupted, and in those runs in
+which the slot migration stalled, a slot was left in the \enquote{open}
+(\texttt{migrating}/\texttt{importing}) state while the departing
+\texttt{redis-cluster-leader-3} pod lingered in the cluster. It is important to characterise
+this failure mode precisely: such a stall is emphatically \emph{not} a data cliff, since no
+keys are lost and the slots remain present, merely caught mid-migration; it does, however,
+require manual intervention---specifically \texttt{redis-cli -{}-cluster fix}---to drive the
+cluster back to a settled three-master state. The experiment therefore records the operator's
+correctness on the primary metric of data safety alongside a documented operational cost,
+rather than an unqualified endorsement (\cite{redis_admin}).
+
+\subsection{Comparative Analysis}
+
+Table~\ref{tab:results-comparison} consolidates the two outcomes into a single before-and-after
+view. Read across its rows, the table isolates the one factor that is responsible for the
+difference between total data preservation and catastrophic loss: neither the underlying
+hardware, nor the dataset, nor the load profile, nor the resource budget differed between the
+two runs, so that the entire divergence is attributable to whether the scaling mechanism was
+aware of cluster topology. The native mechanism, which manages pod count but is structurally
+blind to hash slots, abandoned one quarter of the keyspace the instant it deleted a master,
+whereas the operator, which encodes the Redis-specific knowledge that a master must be drained
+before it is removed, preserved every slot and every key.
+
+\begin{table}[ht]
+\centering
+\caption{Before-and-after comparison of the two scaling mechanisms for the one-master scale-in
+($4 \rightarrow 3$). Slot-level figures are deterministic; the after-key figures are reported
+from the captured run.}
+\label{tab:results-comparison}
+\begin{tabular}{l c c}
+\hline
+\textbf{Measurement} & \textbf{Scenario A (HPA)} & \textbf{Scenario B (Operator)} \\
+\hline
+\texttt{cluster\_state} (before) & \texttt{ok}   & \texttt{ok}   \\
+\texttt{cluster\_state} (after)  & \texttt{fail} & \texttt{ok}   \\
+Slots covered (before)           & \num{16384}   & \num{16384}   \\
+Slots covered (after)            & \num{12288}   & \num{16384}   \\
+Keys stored (before)             & \num{5000}    & \num{5000}    \\
+Keys stored (after)              & $\approx \num{3750}$ & \num{5000} \\
+Keys lost                        & $\approx \num{1250}$ (one quarter) & \num{0} \\
+Read probe (errored / total)     & $5 / 5$       & $0 / 5$       \\
+Verdict                          & Data cliff    & Graceful drain \\
+\hline
+\end{tabular}
+\end{table}
+
+This substantiates the thesis's central claim that topology-aware automation is a necessary
+condition for the safe elastic operation of a sharded, stateful workload, while at the same
+time qualifying that claim in an important respect. The operator is necessary, but it is not,
+on its own, sufficient for fully hands-off operation: its lack of self-healing leaves a
+residual class of interrupted-reshard failures that, at present, only a human operator can
+resolve. The practical reading of these results is therefore not that the operator renders
+scaling effortless, but that it relocates the operator's burden from the unrecoverable
+(reconstructing lost data after a cliff) to the recoverable (completing a stalled but
+data-safe migration)---a decisive qualitative improvement even where it is not a complete
+elimination of operational toil.
+
+\subsection{Threats to Validity}
+
+Several deliberate constraints bound the interpretation of these results. First, the experiment
+was conducted under quiescent conditions; this was an intentional control, adopted so that an
+interrupted reshard caused by live write pressure could not be mistaken for a deficiency of the
+mechanism, but it does mean that the operator's robustness under concurrent load is not
+characterised here and is properly left to the scale-out experiments and to future work.
+Second, the HPA scenario was formed without replicas, which represents the starkest rather than
+the average case; this choice isolates the scaling mechanism cleanly and should be read as a
+demonstration that redundancy is no substitute for slot migration, not as a claim about every
+conceivable HPA topology, since replicas would delay rather than avert the cliff. Third,
+although the slot-level outcomes are deterministic---a direct consequence of the equal,
+\num{4096}-slot partitions produced at cluster formation---the exact number of lost keys depends
+on the hash distribution of the specific dataset and is consequently reported from the captured
+run rather than derived analytically. Finally, the comparison concerns a single one-master
+transition; while the conclusions extend naturally to any individual planned scale-in, the
+experiment does not characterise repeated or multi-master contractions, which would compound the
+operator's resharding workload and are likewise reserved for future investigation.

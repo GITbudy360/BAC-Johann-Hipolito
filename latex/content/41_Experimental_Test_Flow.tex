@@ -1,33 +1,228 @@
-\newpage
-\section{Experimental Test Flow}
-\label{sec:test-flow}
+\section{Experimental Test Flow}\label{sec:test-flow}
 
-The evaluation exercises a deterministic, five-phase procedure known as the "Data-Safety Experiment." This procedure tests a single, highly controlled scale-in transition: reducing a Redis Cluster from four primary master nodes down to three. 
+The evaluation isolates a single question---whether a planned, one-master scale-in of a
+sharded Redis Cluster preserves all \num{16384} hash slots together with every stored
+key---and answers it with the most minimal and deterministic experiment that the question
+admits. To that end the test flow deliberately strips away every component that is not
+strictly required in order to observe the scale-in: there is no \texttt{k6} load
+generator, no FastAPI entrypoint, and no autoscaler whatsoever, neither the Horizontal Pod
+Autoscaler nor KEDA, driving the cluster. In place of synthetic client traffic, a known
+and exact dataset is written directly into the cluster with \texttt{redis-cli}, so that
+the run is \emph{quiescent by construction}---not a single client request reaches Redis
+while the topology is being changed---and the outcome is therefore fully reproducible
+rather than contingent upon the precise timing of live writes. With every confounding
+variable thus removed, the sole independent variable that remains is the \emph{scaling
+mechanism}, while the sole dependent variable is \emph{data loss}, which is operationalised
+as the number of keys lost and the number of hash slots left permanently uncovered. The
+entire procedure is realised by a single parameterised script,
+\texttt{data-safety-experiment.sh}, which is invoked once per mechanism as
+\texttt{./data-safety-experiment.sh [hpa|operator]} and which exposes the dataset size and
+the master counts through the environment variables \texttt{KEYS} (default \num{5000}),
+\texttt{START\_MASTERS} (default $4$), and \texttt{END\_MASTERS} (default $3$).
 
-The metric for success is strict data integrity: measuring the volume of keys lost and the number of hash slots permanently orphaned. By performing this transition under quiescent conditions, the experiment yields a binary, reproducible proof of how each mechanism handles state.
+A Redis Cluster partitions its key space into \num{16384} hash slots that are distributed
+across its master nodes, so that the removal of a master is never the mere termination of a
+pod but rather demands that the departing node's slots first be \emph{resharded}---migrated
+to the surviving masters---if coverage is to be preserved (\cite{redis:clusterspec,redis:scaling}).
+This requirement is what makes scale-in, rather than scale-out, the decisive test of a
+mechanism, and it is sharpened by the cluster's default \texttt{cluster-require-full-cover\-age}
+policy, under which a single uncovered slot causes the \emph{entire} cluster to reject reads
+with a \texttt{CLUSTERDOWN} error: a cluster that has lost even one master's worth of slots
+does not degrade gracefully but ceases to serve altogether.
 
-\subsection{Phase 1: Environment Scorch and Initialisation}
-To prevent state contamination, every iteration begins by systematically destroying the \texttt{redis} namespace, uninstalling any active Helm charts, deleting all Persistent Volume Claims (PVCs), and purging residual \texttt{ServiceMonitor} resources. The namespace is then recreated, ensuring an identical blank slate for both the native HPA and the operator pathways.
+\subsection{Rationale for Reducing the Experiment to the Scale-In}\label{subsec:flow-rationale}
 
-\subsection{Phase 2: Deployment of the Baseline Topology}
-A four-master Redis Cluster is deployed without any replica nodes. Running without replicas is a deliberate experimental control: it prevents native high-availability failover from temporarily masking the architectural failure of a pod deletion.
+The decision to remove the load generator, the application entrypoint, and the autoscalers
+is a deliberate experimental control rather than a simplification of convenience. Because
+resharding is performed live and depends upon clients honouring the \texttt{ASK} and
+\texttt{MOVED} redirections that Redis emits while a slot is held in the
+\texttt{importing}/\texttt{migrating} state, a continuous stream of writes addressed to a
+slot that is in the midst of migration is the dominant cause of an interrupted migration;
+were such an interruption to occur under live load, it would be indistinguishable from a
+genuine deficiency of the scaling mechanism, and the comparison would be confounded.
+Writing the dataset directly with \texttt{redis-cli} and then leaving the cluster idle
+eliminates that stressor entirely, so that any uncovered slot observed after the scale-in
+must be attributed to the mechanism alone. Crucially, the autoscalers themselves are not
+required in order to observe the phenomenon, because each performs, upon scale-down, one
+specific mechanical action that can be reproduced faithfully by hand: the Horizontal Pod
+Autoscaler decrements the StatefulSet's replica count, thereby deleting the highest-ordinal
+pod, whereas the operator lowers the \texttt{clusterSize} field of its custom resource.
+Reproducing exactly those two actions manually, and removing precisely one master, renders
+the experiment deterministic while remaining entirely faithful to what each autoscaler
+would do in production. Finally, because the workload configures neither key expiration nor
+eviction, the populated keys persist indefinitely and remain available for exact post-hoc
+accounting; the metric under examination is data loss, and explicitly not whether the
+transition happened to be perfectly autonomous.
 
-\begin{itemize}
-    \item \textbf{Native HPA Scenario:} A \texttt{StatefulSet} is deployed with \texttt{replicas: 4}. Because a \texttt{StatefulSet} cannot form a Redis topology natively, a \texttt{redis-cli -{}-cluster create} command is executed sequentially against the four pod IPs to allocate the \num{16384} hash slots (\cite{k8s:statefulset}).
-    \item \textbf{Operator Scenario:} A \texttt{RedisCluster} Custom Resource is applied with \texttt{clusterSize: 4}. The operator autonomously coordinates the \texttt{CLUSTER MEET} commands and slot allocations.
-\end{itemize}
-In both scenarios, the script halts until the cluster reports a \texttt{cluster\_state:ok} and confirms all \num{16384} slots are covered.
+\subsection{Common Experimental Procedure}\label{subsec:flow-procedure}
 
-\subsection{Phase 3: Deterministic Data Population}
-Once the four-node baseline is healthy, exactly \num{5000} simple string keys (formatted as \texttt{key:\$i}) are written to the cluster via \texttt{redis-cli}. Because no hash tags are used, the Redis routing algorithm distributes the \num{5000} keys uniformly across the \num{16384} slots, resulting in approximately \num{1250} keys residing on each of the four master nodes. A baseline snapshot is recorded to verify the presence of the dataset.
+Both mechanisms are exercised through the identical five-phase procedure set out below;
+only the provisioning of phase~2 and the scale-in of phase~4 diverge by mechanism, and
+those two divergences are detailed in Sections~\ref{subsec:flow-hpa}
+and~\ref{subsec:flow-operator}. Throughout, every \texttt{redis-cli} command is executed
+inside the ordinal-$0$ leader pod---\texttt{redis-0} in the HPA scenario and
+\texttt{redis-cluster-leader-0} in the operator scenario---which is deliberately chosen as
+the fixed vantage point because a scale-in never removes ordinal $0$, so that this pod is
+guaranteed to survive the transition and to remain reachable for the before-and-after
+measurement.
 
-\subsection{Phase 4: The Scale-In Event}
-With the cluster settled and fully populated, the scale-in command is issued. 
+\begin{enumerate}
+  \item \textbf{Clean slate.} So that no inherited keys or fragmented slots from an earlier
+  run can contaminate the measurement, the \texttt{redis} namespace is scorched in full: any
+  prior Helm release is removed with \texttt{helm uninstall redis-cluster -n redis}, the
+  scenario manifests and all persistent volume claims are deleted with
+  \texttt{k3s kubectl delete pvc -{}-all -n redis}, and the namespace itself is then deleted
+  and awaited with \texttt{k3s kubectl delete namespace redis -{}-ignore-not-found=true}
+  followed by \texttt{k3s kubectl wait -{}-for=delete namespace/redis -{}-timeout=120s}.
+  A fresh namespace is finally recreated idempotently with
+  \texttt{k3s kubectl create namespace redis -{}-dry-run=client -o yaml | k3s kubectl apply -f -}.
 
-\begin{itemize}
-    \item \textbf{Native HPA Scenario:} The script executes \texttt{kubectl scale statefulset -{}-replicas=3}. This perfectly mimics the action taken by a reactive HPA controller. The Kubernetes scheduler immediately issues a termination signal to the highest-ordinal pod (\texttt{redis-3}).
-    \item \textbf{Operator Scenario:} The script executes \texttt{kubectl patch rediscluster -{}-type merge -p '\{"spec":\{"clusterSize":3\}\}'}. This mimics the action of an event-driven scaling trigger. The operator intercepts the size reduction, initiates a live migration to drain the targeted master's slots onto the surviving nodes, and only permits pod termination once the node is empty.
-\end{itemize}
+  \item \textbf{Provisioning and health gate.} The data tier is deployed directly at
+  \texttt{START\_MASTERS} masters by the mechanism-specific commands of
+  Section~\ref{subsec:flow-hpa} or~\ref{subsec:flow-operator}, with no autoscaler, no
+  entrypoint, and no load attached. The script then refuses to proceed until the cluster is
+  genuinely whole: it polls \texttt{k3s kubectl exec <leader-0> -n redis -{}- redis-cli cluster info}
+  on a five-second interval and continues only once that output reports both
+  \texttt{cluster\_state:ok} and \texttt{cluster\_slots\_ok:16384}, aborting rather than
+  populating a half-formed cluster. This health gate ensures that the \emph{before} state is
+  unambiguously healthy and that any later loss is therefore caused by the scale-in and not
+  by an incomplete formation.
 
-\subsection{Phase 5: Evaluation and Probing}
-After the designated pod is terminated, a final state snapshot is taken. The total surviving keys and the total covered hash slots are recorded. To definitively test cluster availability, the script executes five targeted read probes. Because the Redis Cluster specification requires full \num{16384} slot coverage by default, any permanent loss of slots will cause the cluster to reject the read probes with a \texttt{CLUSTERDOWN} error (\cite{redis:clusterspec}). The comparison of the before and after states forms the empirical verdict presented in Chapter~\ref{sec:results}.
+  \item \textbf{Population and \emph{before} snapshot.} A deterministic, exactly known
+  dataset is written by the single command
+  \texttt{for i in \$(seq 1 \$KEYS); do echo set key:\$i \$i; done | redis-cli -c -h 127.0.0.1},
+  which issues \texttt{SET key:i i} for every $i$ from $1$ to \texttt{KEYS}; the keys carry no
+  hash tags and are consequently spread across the full slot range rather than pinned to any
+  single node. Because this command is the only writer the cluster ever sees, the population
+  is itself quiescent. The script then records the \emph{before} snapshot, reading the cluster
+  state and the covered-slot count from \texttt{redis-cli cluster info} and the authoritative
+  key total from the \texttt{N keys in M masters} summary line of
+  \texttt{redis-cli -{}-cluster check 127.0.0.1:6379}.
+
+  \item \textbf{The scale-in.} Exactly one master is then removed, taking the cluster from
+  \texttt{START\_MASTERS} to \texttt{END\_MASTERS}, by the mechanism-specific command of
+  Section~\ref{subsec:flow-hpa} or~\ref{subsec:flow-operator}; from this point onward the
+  script no longer aborts on error but instead captures and reports whatever state results,
+  since a wedged or cliffed cluster is itself a valid finding.
+
+  \item \textbf{\emph{After} snapshot, read probe, and verdict.} After a brief settling
+  pause the snapshot is repeated to obtain the \emph{after} state, slot count, and key total,
+  and the number of lost keys is computed as the arithmetic difference between the before and
+  after totals. A direct read probe is then issued for five representative keys spanning the
+  key space---\texttt{key:1}, \texttt{key:1000}, \texttt{key:2500}, \texttt{key:4000}, and
+  \texttt{key:4999}---each via \texttt{redis-cli -c -h 127.0.0.1 get key:<n>}, and the number
+  of replies containing a \texttt{CLUSTERDOWN} error is counted. The measurement and the
+  resulting verdict are described in full in Section~\ref{subsec:flow-verdict}.
+\end{enumerate}
+
+\subsection{Scenario A: The Native StatefulSet (HPA) Mechanism}\label{subsec:flow-hpa}
+
+\paragraph{Provisioning (phase~2).} The self-managed cluster is assembled from native
+primitives. The StatefulSet, its headless service, and its configuration map are applied
+with \texttt{k3s kubectl apply -f redis-hpa-cluster.yaml}; the StatefulSet is then sized to
+exactly the master count with
+\texttt{k3s kubectl scale statefulset redis -n redis -{}-replicas=\$START\_MASTERS} and
+awaited with \texttt{k3s kubectl rollout status statefulset redis -n redis -{}-timeout=300s},
+after which the exporter's service monitor is applied with
+\texttt{k3s kubectl apply -f redis-servicemonitor.yaml}. Because a StatefulSet manifest
+cannot itself express cluster topology, the cluster is then formed imperatively: the script
+collects the pod IPs of \texttt{redis-0} through \texttt{redis-(START\_MASTERS$-1$)} and
+executes \texttt{redis-cli -{}-cluster create <ip0:6379> {\ldots} <ip3:6379> -{}-cluster-yes}
+from within \texttt{redis-0}. Notably, this invocation omits the \texttt{-{}-cluster-replicas}
+flag, so that the four nodes are formed as \emph{bare masters with no replicas}; this is a
+deliberate choice that exposes the scale-in cliff in its starkest form, since there is no
+replica available to mask or delay the loss.
+
+\paragraph{Scale-in (phase~4).} The departure of one master is effected by the single
+command \texttt{k3s kubectl scale statefulset redis -n redis -{}-replicas=\$END\_MASTERS},
+whose completion is awaited with
+\texttt{k3s kubectl wait -{}-for=delete pod/redis-\$END\_MASTERS -n redis -{}-timeout=120s}.
+This is, by construction, the exact action that the Horizontal Pod Autoscaler performs on
+scale-down: a StatefulSet terminates its pods in strictly descending ordinal order
+(\cite{k8s:statefulset}), so the command deletes the highest-ordinal pod, \texttt{redis-3},
+and does so with no drain, no reshard, and---because the cluster was formed without
+replicas---no surviving replica to promote in its place.
+
+\paragraph{Hypothesis.} It is expected that the removal of \texttt{redis-3} will orphan that
+master's share of the slots the instant the pod terminates, driving \texttt{cluster\_slots\_ok}
+below \num{16384} and flipping \texttt{cluster\_state} to \texttt{fail}; the lost slots will
+render their keys unreachable, the before-and-after key totals will differ by a positive
+amount, and the read probe will return \texttt{CLUSTERDOWN} for all five keys. This is the
+reverse-ordinal \emph{data cliff}, and it is expected to manifest even at zero load precisely
+because it is structural rather than load-induced (\cite{k8s:hpa}).
+
+\subsection{Scenario B: The Operator Mechanism}\label{subsec:flow-operator}
+
+\paragraph{Provisioning (phase~2).} The operator-managed cluster is declared rather than
+assembled. After the chart repository has been registered and refreshed with
+\texttt{helm repo add ot-helm https://ot-container-kit.github.io/helm-charts/} and
+\texttt{helm repo update ot-helm}, the cluster is deployed at the desired master count by the
+single command
+\texttt{helm upgrade -{}-install redis-cluster ot-helm/redis-cluster -n redis -f redis-operator-cluster-values.yaml -{}-set redisCluster.clusterSize=\$START\_MASTERS},
+and the exporter's service monitor is applied with
+\texttt{k3s kubectl apply -f redis-servicemonitor.yaml}. In contrast to the imperative
+formation of Scenario~A, the Opstree Redis Operator now reconciles the custom resource into
+the leader and follower StatefulSets and forms the cluster of its own accord, issuing the
+necessary \texttt{CLUSTER MEET} commands and assigning the slots without any manual step
+(\cite{k8s:operator,opstree:redisoperator}).
+
+\paragraph{Scale-in (phase~4).} The departure of one master is requested declaratively, by
+lowering the desired size on the custom resource with
+\texttt{k3s kubectl patch rediscluster redis-cluster -n redis -{}-type merge -p '\{"spec":\{"clusterSize":\$END\_MASTERS\}\}'},
+whose effect is awaited with
+\texttt{k3s kubectl wait -{}-for=delete pod/redis-cluster-leader-\$END\_MASTERS -n redis -{}-timeout=600s}.
+Unlike the StatefulSet decrement of Scenario~A, this mechanism is topology-aware: the
+operator first \emph{drains} the departing master, migrating its slots to the surviving
+masters, and only then removes the pod (\cite{redis:scaling}). The materially longer
+timeout---ten minutes rather than two---reflects the fact that this drain entails live slot
+migration, which takes appreciable time, whereas the StatefulSet deletion is effectively
+instantaneous.
+
+\paragraph{Hypothesis.} It is expected that the operator will hold continuous \num{16384}-slot
+coverage throughout the transition, leaving \texttt{cluster\_state:ok} intact and the
+before-and-after key totals identical, so that the read probe returns all five keys without
+error. A documented residual limitation is, however, deliberately probed rather than
+concealed: the operator possesses no self-healing for an interrupted drain, so that should the
+migration stall, a slot may be left in the \texttt{importing}/\texttt{migrating}
+(\enquote{open}) state and the departing \texttt{redis-cluster-leader-\$END\_MASTERS} pod may
+linger. Such a stall is expected to be \emph{recoverable without data loss}---distinct from a
+true cliff---and repairable by a human operator with
+\texttt{redis-cli -{}-cluster fix 127.0.0.1:6379} (\cite{redis:clusterspec}).
+
+\subsection{Measurement, Read Probe, and Verdict}\label{subsec:flow-verdict}
+
+The measurement rests on three authoritative quantities, all read from the surviving
+ordinal-$0$ leader: the cluster state and the covered-slot count, both taken from
+\texttt{redis-cli cluster info} as \texttt{cluster\_state} and \texttt{cluster\_slots\_ok},
+and the total number of stored keys, taken from the \texttt{N keys in M masters} summary line
+of \texttt{redis-cli -{}-cluster check 127.0.0.1:6379}. Capturing this triple both before and
+after the scale-in yields a compact comparison table, and the number of lost keys is reported
+as the difference between the two key totals. The read probe complements these aggregate
+figures with a direct behavioural test: because the default
+\texttt{cluster-require-full-coverage} policy causes any single uncovered slot to make the
+whole cluster reject reads, the five-key probe is effectively binary---a healthy cluster
+serves all five keys, whereas a cliffed cluster serves none and answers every request with
+\texttt{CLUSTERDOWN}---so that the count of errored reads is an unambiguous, mechanism-agnostic
+indicator of coverage.
+
+From these measurements the script derives an explicit verdict. A transition is declared a
+\emph{graceful} scale-in only when all three conditions hold simultaneously: the after-state
+is \texttt{ok}, the after-slot count is exactly \num{16384}, and no keys have been lost; if
+any condition fails, the transition is declared a \emph{data cliff} and the precise
+state, slot count, and lost-key total are reported. A single further distinction is drawn for
+the operator: if the departing leader pod is found to still exist after the wait, the verdict
+distinguishes a recoverable \emph{stall}---in which slots are merely mid-migration and no data
+has been lost---from a genuine cliff, and it prints the exact \texttt{redis-cli -{}-cluster fix}
+remedy. In all cases the cluster is intentionally left in its post-scale-in state so that the
+corresponding Grafana panels, on which \texttt{redis\_cluster\_slots\_assigned} and
+\texttt{sum(redis\_db\_keys\{namespace="redis"\})} either hold or visibly step down, can be
+captured for the Results chapter.
+
+\paragraph{Hypothesis.} Taken together, the two scenarios are expected to demonstrate that the
+distinction between data preservation and catastrophic data loss during a planned scale-in is
+governed entirely by the scaling mechanism: the native StatefulSet decrement, faithfully
+reproducing the HPA's action, is expected to produce a structural data cliff even under
+perfectly quiescent conditions, whereas the operator's topology-aware drain is expected to
+preserve full slot coverage and every key---subject only to the documented, recoverable, and
+data-safe stall---thereby supporting the thesis that topology-aware automation is necessary
+for the safe elastic operation of a stateful, sharded workload.

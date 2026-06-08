@@ -1,3 +1,123 @@
 \newpage
 \section{Conclusion}
 \label{sec:conclusion}
+
+This thesis set out from a deceptively simple observation---that a Kubernetes pod is a unit
+of scheduling whereas a Redis shard is a unit of data ownership, and that the two coincide
+only for as long as the cluster's topology remains undisturbed---and asked what happens to a
+sharded, stateful workload when that topology is disturbed in the most consequential way, by
+removing a slot-owning master during a planned scale-in. Through a deliberately minimal and
+fully controlled experiment, it has shown that the answer is governed not by how a scaling
+decision is timed, nor by whether redundancy is present, nor by the load the cluster happens
+to be under, but by a single architectural property of the mechanism that carries the removal
+out: whether or not that mechanism is aware of the cluster's slot topology.
+
+\subsection{Revisiting the Research Question}
+
+The central question---whether a planned, one-master scale-in of a sharded Redis Cluster
+preserves all \num{16384} hash slots together with every stored key, and to what extent the
+answer depends on the scaling mechanism---admits a clear and sharply divided answer. When the
+removal was performed by the native StatefulSet contraction, which is precisely the action a
+Horizontal Pod Autoscaler issues on scale-down, the cluster suffered an immediate and
+irreversible \textit{data cliff}: the departing master's slots, neither drained nor
+resharded, were abandoned the instant its pod terminated, slot coverage fell below
+\num{16384}, the cluster state transitioned to \texttt{fail}, roughly a quarter of the
+keyspace became permanently unreachable, and---under the default
+\texttt{cluster-require-full-coverage} policy---every read was refused with a
+\texttt{CLUSTERDOWN} error. When the same transition was requested of the Opstree Redis
+Operator, the outcome was the exact opposite: the operator drained the departing master,
+migrating its slots to the survivors before removing the pod, so that full coverage was held
+throughout and not a single key was lost. The hypothesis advanced in
+Section~\ref{sec:hypothesis}---that topology-aware operation is a precondition for data-safe
+scale-in---is therefore confirmed.
+
+Two features of this result give it particular force. First, the loss in the native case
+occurred under perfectly quiescent conditions, with no client traffic of any kind, which
+establishes the cliff as a \textit{structural} consequence of the mechanism rather than an
+artefact of write pressure, contention, or timing. Second, the divergence between total
+preservation and catastrophic loss was produced while every other variable---the hardware,
+the dataset, the resource budget, and the absence of load---was held identical, which
+isolates topology-awareness as the sole cause. Redundancy is no substitute: a replica would
+have delayed the cliff by one promotion but could not have prevented it, because a planned
+scale-in fundamentally requires the migration of slots that no native primitive performs.
+
+\subsection{Contributions}
+
+The principal contributions of this thesis may be stated concisely. It demonstrates, in
+isolation and with a deterministic and reproducible method, that the native, topology-blind
+scaling mechanism inflicts structural and irreversible data loss on the scale-in of a sharded
+Redis Cluster, and that a topology-aware operator preserves the keyspace in full under
+identical conditions (\cite{redis:scaling}; \cite{opstree:redisoperator}). In doing so it
+establishes that the determining factor for data safety is the scaling \textit{mechanism}
+rather than the scaling \textit{trigger}, thereby reframing a question that the existing
+literature has approached almost exclusively through the lens of reactive-versus-proactive
+timing. Methodologically, it contributes a minimal experimental design---direct dataset
+population, a single quiescent one-master transition, and measurement through the cluster's
+own slot and key telemetry---that strips away the confounds of a fuller pipeline and renders
+the mechanism the only variable. Finally, and importantly for the credibility of the result,
+it characterises the proposed solution honestly rather than uncritically: the operator is
+shown to be \textit{necessary but not, on its own, sufficient} for fully hands-off elastic
+operation, because its lack of self-healing for an interrupted reshard can leave a slot in an
+open, mid-migration state that a human operator must settle by hand with
+\texttt{redis-cli -{}-cluster fix}.
+
+\subsection{Reflection on Scope and Methodology}
+
+The strength of the foregoing result rests on the deliberate narrowness of the experiment
+that produced it, and it is worth reflecting on that scoping explicitly. The study was
+confined to the data-safety of a single scale-in under quiescent conditions, and this
+confinement was not an evasion of difficulty but a direct response to one. An earlier,
+fuller pipeline---comprising an external load generator, an application entrypoint, and an
+event-driven autoscaling trigger---was found to confound the very measurement it was meant to
+support: under a sustained, write-heavy workload, a continuous stream of writes addressed to
+a slot that was mid-migration was the dominant cause of an interrupted reshard, and an
+interruption so caused would have been indistinguishable from a genuine defect of the scaling
+mechanism. Removing the load, the entrypoint, and the trigger, and writing the dataset
+directly, eliminated that confound and made the outcome a deterministic property of the
+mechanism alone. The load-induced interruption is not thereby dismissed; it is itself a
+finding, namely that write pressure rather than the mechanism is the governing factor in
+reshard interruption, and it is what justifies the controlled isolation.
+
+It follows that certain elements present in the thesis's initial conception were, in the
+final analysis, deliberately reframed as out of scope rather than evaluated. The event-driven
+trigger layer in particular---the question of whether scaling decisions are taken reactively
+or proactively, and the role of application-level metrics in that decision---was set aside as
+orthogonal to the data-safety question, on the reasoning that no quality of trigger can
+rescue an unsafe removal mechanism and none is needed to vindicate a safe one. What remains,
+and what the thesis ultimately defends, is a tightly bounded but firmly established claim
+about the scaling mechanism itself. The remaining limitations follow from the same boundary
+and are enumerated among the threats to validity in Section~\ref{sec:results}: the operator's
+robustness under concurrent load is not characterised here, the native cluster was formed
+without replicas so as to expose the cliff in its starkest form, and the comparison concerns
+a single one-master transition rather than a repeated or multi-master contraction.
+
+\subsection{Future Work}
+
+These boundaries map directly onto the most promising directions for further work. The most
+immediate is the reintroduction of live load under controlled conditions, in order to
+characterise how frequently the operator's reshard is interrupted under realistic write
+pressure and how that frequency scales with throughput---turning the confound identified
+above into an object of study in its own right. A natural second direction is to layer an
+event-driven trigger, such as the Kubernetes Event-Driven Autoscaling project, atop the
+topology-aware mechanism, so as to combine a proactive scaling decision with a data-safe
+scaling action and to evaluate the pairing against the reactive baseline. A third, and
+perhaps the most consequential for practice, is to close the self-healing gap that renders
+the operator necessary but not sufficient: automating the detection and repair of an
+interrupted reshard would move the operator from data-safe-but-supervised toward genuinely
+hands-off operation. Beyond these, the comparison invites extension to repeated and
+multi-master contractions, to clusters that enable replication and persistence, to
+substantially larger datasets, and to other operators and other sharded stores, so as to test
+the generality of the conclusion drawn here.
+
+\subsection{Concluding Remarks}
+
+The title of this thesis asserts that pods are not shards, and the experiment has given that
+assertion an empirical edge. Treating the removal of a stateful, slot-owning node as though
+it were the removal of an interchangeable, stateless replica does not merely degrade
+performance; it destroys data, structurally and irreversibly, and it does so the moment the
+pod is deleted. The remedy is not a faster or more anticipatory autoscaler but an autoscaling
+\textit{mechanism} that understands what it is removing---one that drains before it deletes.
+Such topology-aware operation, as embodied here by a Kubernetes operator, is therefore a
+necessary foundation for the safe elastic operation of sharded, stateful workloads; the
+remaining distance to fully autonomous operation is measured precisely by the operational toil
+that the operator, as it stands today, still leaves to a human hand.
