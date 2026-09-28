@@ -1,0 +1,40 @@
+apiVersion: redis.redis.opstreelabs.in/v1beta2
+kind: RedisCluster
+metadata:
+  name: redis-master
+  namespace: redis-cluster
+spec:
+  clusterSize: 3
+  clusterVersion: v7
+  persistenceEnabled: true
+  kubernetesConfig:
+    image: quay.io/opstree/redis:v7.2.3
+    imagePullPolicy: IfNotPresent
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "128Mi"
+      limits:
+        cpu: "250m"
+        memory: "256Mi"
+  # This storage block provisions writable volumes for the pods
+  storage:
+    volumeClaimTemplate:
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
+  redisLeader:
+    affinity:
+      podAntiAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            labelSelector:
+              matchExpressions:
+              - key: app
+                operator: In
+                values:
+                - redis-master-leader
+            topologyKey: "kubernetes.io/hostname"
