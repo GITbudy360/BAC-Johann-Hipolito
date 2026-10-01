@@ -1,0 +1,43 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fastapi-leaderboard
+  namespace: fastapi-leaderboard
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: fastapi-leaderboard
+  template:
+    metadata:
+      labels:
+        app: fastapi-leaderboard
+    spec:
+      # This points to the secret created in Step 3
+      imagePullSecrets:
+      - name: ghcr-secret
+      containers:
+      - name: fastapi
+        image: ghcr.io/gitbudy360/fastapi-leaderboard:v1.2
+        ports:
+        - containerPort: 8000
+        env:
+        - name: REDIS_HOST
+          value: "redis-master-leader.redis-cluster.svc.cluster.local"
+        resources:
+          requests:
+            cpu: "500m"       # 500 millicores (0.5 CPU)
+            memory: "512Mi"   # 512 Mebibytes
+          limits:
+            cpu: "1000m"      # 1 full CPU core
+            memory: "1Gi"     # 1 Gibibyte
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: app
+                operator: In
+                values:
+                - fastapi-leaderboard
+            topologyKey: "kubernetes.io/hostname"
