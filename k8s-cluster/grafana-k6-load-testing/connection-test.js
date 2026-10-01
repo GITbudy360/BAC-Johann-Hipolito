@@ -8,7 +8,7 @@ export const options = {
 
 export default function () {
   // Replace <NODE_PORT> with the actual port exposed by your FastAPI service
-  const res = http.get('http://ca-crs-bak-hipolito-01:8000/'); 
+  const res = http.get('http://ca-crs-bak-hipolito-01:31964/'); 
   
   check(res, {
     'node resolved and reachable': (r) => r.error_code === 0,
