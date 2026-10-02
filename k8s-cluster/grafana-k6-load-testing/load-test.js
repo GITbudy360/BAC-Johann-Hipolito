@@ -3,24 +3,29 @@ import { check, sleep } from 'k6';
 
 export const options = {
   stages: [
-    // 1. Baseline: Establish normal operation metrics before scaling triggers
-    { duration: '2m', target: 20 }, 
-    
-    // 2. Load Spike: Trigger HPA/KEDA and force the Opstree operator to re-shard
-    { duration: '1m', target: 150 }, 
-    
-    // 3. Sustained Peak: Hold long enough to measure Data Sync Duration (2b) 
-    // and observe Re-sharding CPU Penalty (1a) / Memory Pressure (1b)
-    { duration: '7m', target: 150 }, 
-    
-    // 4. Premature Drop: Abruptly kill the traffic to test Predictive Resource Waste (3c)
-    // This abrupt drop tests if the forecasting model over-provisioned.
-    { duration: '10s', target: 10 }, 
-    
-    // 5. Cooldown: Observe control plane overhead (1c) during scale-down
-    { duration: '3m', target: 10 },
+    // 00:00 - 06:00 (Night Baseline): 5m at 10 VUs (Initializes predictive lookback window)
+    { duration: '5m', target: 10 },
+
+    // 06:00 - 11:30 (Morning Ramp): 4m climbing to 80 VUs (Tests linear forecasting)
+    { duration: '4m', target: 80 },
+
+    // 11:30 - 13:30 (Lunch Peak): 8m held at 180 VUs (Forces Opstree re-sharding & measures 1a, 1b, 2b)
+    { duration: '8m', target: 180 },
+
+    // 13:30 - 16:00 (Afternoon Plateau): 4m stepping down to 60 VUs (Post-scale stabilization)
+    { duration: '4m', target: 60 },
+
+    // 16:00 - 17:00 (Flash Spike): 1m spike to 200 VUs immediately followed by a drop
+    { duration: '1m', target: 200 },
+
+    // Premature Drop: 10s cliff down to 20 VUs (Tests 3c: Predictive Resource Waste)
+    { duration: '10s', target: 20 },
+
+    // Cooldown & Observation: 8m at 20 VUs (Observes idle pod allocation and scale-down)
+    { duration: '8m', target: 20 },
     { duration: '1m', target: 0 },
   ],
+
   thresholds: {
     // Explicitly track p50, p95, and p99 to measure client disturbance (3b)
     // Adding 'delay' ensures we only track the latency of successful 200 OK responses
