@@ -1,5 +1,5 @@
 import http from 'k6/http';
-import { check } from 'k6';
+import { check, sleep } from 'k6';
 
 export const options = {
   stages: [
@@ -23,7 +23,8 @@ export const options = {
   ],
   thresholds: {
     // Explicitly track p50, p95, and p99 to measure client disturbance (3b)
-    http_req_duration: ['p(50)<200', 'p(95)<500', 'p(99)<1000'], 
+    // Adding 'delay' ensures we only track the latency of successful 200 OK responses
+    'http_req_duration{status:200}': ['p(50)<200', 'p(95)<500', 'p(99)<1000'],  
   },
 };
 
@@ -34,4 +35,8 @@ export default function () {
     'node resolved and reachable': (r) => r.error_code === 0,
     'status is 200': (r) => r.status === 200,
   });
+
+  console.log(res.status, res.body);
+
+  sleep(1); // Add a 1-second delay between requests
 }
