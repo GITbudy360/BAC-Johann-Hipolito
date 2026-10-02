@@ -1,3 +1,6 @@
+import http from 'k6/http';
+import { check } from 'k6';
+
 export const options = {
   stages: [
     // 1. Baseline: Establish normal operation metrics before scaling triggers
@@ -23,3 +26,12 @@ export const options = {
     http_req_duration: ['p(50)<200', 'p(95)<500', 'p(99)<1000'], 
   },
 };
+
+export default function () {
+  const res = http.get('http://ca-crs-bak-hipolito-01:31964/'); 
+  
+  check(res, {
+    'node resolved and reachable': (r) => r.error_code === 0,
+    'status is 200': (r) => r.status === 200,
+  });
+}
