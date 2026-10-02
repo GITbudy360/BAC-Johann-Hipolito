@@ -48,6 +48,7 @@ export default function () {
     };
     const res = http.post(`${BASE_URL}/player/${playerId}/score`, payload, params);
     check(res, { 'write status is 200': (r) => r.status === 200 });
+    console.log(res.status, res.body);
 
   } else if (rand < 0.90) {
     // 70% Probability: Read a single player's rank
@@ -56,6 +57,7 @@ export default function () {
     });
     // Accept 404 as valid because players might not be written yet in the first few seconds
     check(res, { 'rank status is 200 or 404': (r) => r.status === 200 || r.status === 404 });
+    console.log(res.status, res.body);
 
   } else {
     // 10% Probability: Read the full leaderboard
@@ -63,15 +65,8 @@ export default function () {
       tags: { endpoint: 'read_leaderboard' }
     });
     check(res, { 'leaderboard status is 200': (r) => r.status === 200 });
-
+    console.log(res.status, res.body);
   }
-  
-  check(res, {
-    'node resolved and reachable': (r) => r.error_code === 0,
-    'status is 200': (r) => r.status === 200,
-  });
 
-  console.log(res.status, res.body);
-
-  sleep(1); // Add a 1-second delay between requests
+  sleep(1);
 }
