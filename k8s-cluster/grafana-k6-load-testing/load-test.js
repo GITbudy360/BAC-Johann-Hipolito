@@ -33,8 +33,8 @@ export const options = {
 };
 
 export default function () {
-  const res = http.get('http://ca-crs-bak-hipolito-01:31964/'); 
-
+  const BASE_URL = 'http://ca-crs-bak-hipolito-01:31964';
+  
   // Use a constrained pool (e.g., 1 to 5000) so random reads overlap with random writes
   const playerId = `player_${Math.floor(Math.random() * 5000) + 1}`;
   const rand = Math.random();
@@ -63,7 +63,7 @@ export default function () {
       tags: { endpoint: 'read_leaderboard' }
     });
     check(res, { 'leaderboard status is 200': (r) => r.status === 200 });
-    
+
   }
   
   check(res, {
