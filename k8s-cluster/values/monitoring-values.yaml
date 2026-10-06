@@ -1,0 +1,35 @@
+# Define anchors to avoid repeating the exact same blocks
+tolerations: &control_tolerations
+  - key: "node-role.kubernetes.io/master"
+    operator: "Exists"
+    effect: "NoSchedule"
+
+nodeSelector: &control_nodeselector
+  kubernetes.io/hostname: "ca-crs-bak-hipolito-01"
+
+# Apply to Alertmanager
+alertmanager:
+  alertmanagerSpec:
+    nodeSelector: *control_nodeselector
+    tolerations: *control_tolerations
+
+# Apply to Prometheus Server
+prometheus:
+  prometheusSpec:
+    nodeSelector: *control_nodeselector
+    tolerations: *control_tolerations
+
+# Apply to Grafana
+grafana:
+  nodeSelector: *control_nodeselector
+  tolerations: *control_tolerations
+
+# Apply to Prometheus Operator
+prometheusOperator:
+  nodeSelector: *control_nodeselector
+  tolerations: *control_tolerations
+
+# Apply to Kube-State-Metrics
+kube-state-metrics:
+  nodeSelector: *control_nodeselector
+  tolerations: *control_tolerations
