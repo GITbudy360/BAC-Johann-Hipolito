@@ -18,11 +18,17 @@ prometheus:
   prometheusSpec:
     nodeSelector: *control_nodeselector
     tolerations: *control_tolerations
+  service:
+    type: NodePort
+    nodePort: 32001
 
 # Apply to Grafana
 grafana:
   nodeSelector: *control_nodeselector
   tolerations: *control_tolerations
+  service:
+    type: NodePort
+    nodePort: 32000
 
 # Apply to Prometheus Operator
 prometheusOperator:
