@@ -1,4 +1,0 @@
-prometheus:
-  service:
-    type: NodePort
-    nodePort: 32001
