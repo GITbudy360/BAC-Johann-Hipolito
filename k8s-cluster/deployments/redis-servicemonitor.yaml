@@ -1,0 +1,22 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: redis-cluster-monitor
+  namespace: redis-cluster
+  labels:
+    # Update this if your Prometheus stack uses a different release name
+    release: prometheus 
+spec:
+  namespaceSelector:
+    matchNames:
+      - redis-cluster
+  selector:
+    matchLabels:
+      # Insert the label you identified in Step 1 here
+      app: redis-master-leader 
+  endpoints:
+    # 'redis-exporter' is the default port name provisioned by Opstree
+    - port: redis-exporter 
+      # 5s interval provides the high resolution needed for predict_linear()
+      interval: 5s 
+      path: /metrics
