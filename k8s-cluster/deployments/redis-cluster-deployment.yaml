@@ -7,6 +7,12 @@ spec:
   clusterSize: 3
   clusterVersion: v7
   persistenceEnabled: true
+  # Redis exporter is enabled to monitor the Redis cluster
+  redisExporter:
+    enabled: true
+    image: quay.io/opstree/redis-exporter:v1.44.0
+  kubernetesConfig:
+    image: quay.io/opstree/redis:v7.2.3
   kubernetesConfig:
     image: quay.io/opstree/redis:v7.2.3
     imagePullPolicy: IfNotPresent
