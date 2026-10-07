@@ -4,6 +4,8 @@ metadata:
   name: fastapi-leaderboard
   namespace: fastapi-leaderboard
 spec:
+  strategy:
+    type: Recreate
   replicas: 3
   selector:
     matchLabels:
