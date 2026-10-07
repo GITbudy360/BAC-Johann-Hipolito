@@ -18,7 +18,7 @@ spec:
       - name: ghcr-secret
       containers:
       - name: fastapi
-        image: ghcr.io/gitbudy360/fastapi-leaderboard:v1.2
+        image: ghcr.io/gitbudy360/fastapi-leaderboard:v1.25
         ports:
         - containerPort: 8000
         env:

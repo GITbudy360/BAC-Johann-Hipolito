@@ -1,8 +1,11 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import redis.asyncio as redis
-import os
 from redis.asyncio.cluster import RedisCluster as AsyncRedisCluster
+from redis.asyncio.retry import Retry
+from redis.backoff import ExponentialBackoff
+from redis.exceptions import ConnectionError, TimeoutError, RedisClusterException
+import os
 
 # Pull Redis configuration from environment variables (useful for Kubernetes)
 REDIS_HOST = os.getenv("REDIS_HOST", "redis-master")
@@ -12,7 +15,13 @@ REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
 redis_client = AsyncRedisCluster(
     host=REDIS_HOST, 
     port=REDIS_PORT, 
-    decode_responses=True
+    decode_responses=True,
+    # Prevent crashes if some hash slots are temporarily migrating during re-sharding
+    require_full_coverage=False,
+    # Retry up to 3 times with an exponential backoff (e.g., 0.1s, 0.2s, 0.4s)
+    retry=Retry(ExponentialBackoff(), retries=3),
+    # Force a topology refresh and retry if these specific network errors occur
+    retry_on_error=[ConnectionError, TimeoutError, RedisClusterException, OSError]
 )
 
 app = FastAPI(title="Global Leaderboard API")
