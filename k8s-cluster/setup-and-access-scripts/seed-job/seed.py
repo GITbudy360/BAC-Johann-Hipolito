@@ -27,6 +27,11 @@ async def seed_data():
         retry_on_error=[ConnectionError, TimeoutError, RedisClusterException, OSError]
     )
 
+
+    # Force topology initialization before creating the pipeline
+    await redis_client.ping()
+    print("Cluster topology initialized successfully.")
+
     print(f"Populating {TOTAL_PLAYERS} players into '{LEADERBOARD_KEY}'...")
 
     # Initialize a non-transactional pipeline to batch network requests
