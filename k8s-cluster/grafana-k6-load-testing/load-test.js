@@ -3,26 +3,26 @@ import { check, sleep } from 'k6';
 
 export const options = {
   stages: [
-    // 00:00 - 06:00 (Night Baseline): 5m at 10 VUs (Initializes predictive lookback window)
-    { duration: '5m', target: 10 },
+    // 00:00 - 06:00 (Night Baseline): 5m at 20 VUs (Initializes predictive lookback window)
+    { duration: '5m', target: 20 },
 
-    // 06:00 - 11:30 (Morning Ramp): 4m climbing to 80 VUs (Tests linear forecasting)
-    { duration: '4m', target: 80 },
+    // 06:00 - 11:30 (Morning Ramp): 4m climbing to 160 VUs (Tests linear forecasting)
+    { duration: '4m', target: 160 },
 
-    // 11:30 - 13:30 (Lunch Peak): 8m held at 180 VUs (Forces Opstree re-sharding & measures 1a, 1b, 2b)
-    { duration: '8m', target: 180 },
+    // 11:30 - 13:30 (Lunch Peak): 8m held at 360 VUs (Forces Opstree re-sharding & measures 1a, 1b, 2b)
+    { duration: '8m', target: 360 },
 
-    // 13:30 - 16:00 (Afternoon Plateau): 4m stepping down to 60 VUs (Post-scale stabilization)
-    { duration: '4m', target: 60 },
+    // 13:30 - 16:00 (Afternoon Plateau): 4m stepping down to 120 VUs (Post-scale stabilization)
+    { duration: '4m', target: 120 },
 
-    // 16:00 - 17:00 (Flash Spike): 1m spike to 200 VUs immediately followed by a drop
-    { duration: '1m', target: 200 },
+    // 16:00 - 17:00 (Flash Spike): 1m spike to 400 VUs immediately followed by a drop
+    { duration: '1m', target: 400 },
 
-    // Premature Drop: 10s cliff down to 20 VUs (Tests 3c: Predictive Resource Waste)
-    { duration: '10s', target: 20 },
+    // Premature Drop: 10s cliff down to 40 VUs (Tests 3c: Predictive Resource Waste)
+    { duration: '10s', target: 40 },
 
-    // Cooldown & Observation: 8m at 20 VUs (Observes idle pod allocation and scale-down)
-    { duration: '8m', target: 20 },
+    // Cooldown & Observation: 8m at 40 VUs (Observes idle pod allocation and scale-down)
+    { duration: '8m', target: 40 },
     { duration: '1m', target: 0 },
   ],
 

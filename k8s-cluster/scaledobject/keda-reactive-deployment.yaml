@@ -1,0 +1,25 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: redis-reactive-scaler
+  namespace: redis-cluster
+spec:
+  scaleTargetRef:
+    # Target the Opstree RedisCluster CRD (Requires Opstree /scale subresource support)
+    # Alternatively, target the 'StatefulSet' of the Redis nodes directly
+    apiVersion: redis.redis.opstreelabs.in/v1beta1
+    kind: RedisCluster
+    name: redis-cluster 
+  minReplicaCount: 3
+  maxReplicaCount: 9
+  pollingInterval: 15    # How often KEDA checks Prometheus (in seconds)
+  cooldownPeriod: 300    # Wait 5 minutes before scaling down
+  triggers:
+  - type: prometheus
+    metadata:
+      # Replace with your actual Prometheus service DNS
+      serverAddress: http://prometheus-operated.monitoring.svc.cluster.local:9090
+      metricName: http_requests_total
+      threshold: "150" # Target RPS threshold to trigger a scale-up
+      # Instant vector query: Current RPS over the last 1 minute
+      query: sum(rate(http_requests_total{namespace="fastapi-leaderboard"}[1m]))

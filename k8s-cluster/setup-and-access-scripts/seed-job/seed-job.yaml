@@ -1,0 +1,28 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: seed-redis
+  namespace: redis-cluster
+spec:
+  # Delete the job automatically 60 seconds after it finishes
+  ttlSecondsAfterFinished: 60 
+  template:
+    spec:
+      containers:
+      - name: seeder
+        image: python:3.11-slim
+        command: ["/bin/sh", "-c"]
+        args:
+        - pip install -r /scripts/requirements.txt && python /scripts/seed.py        
+        env:
+        - name: REDIS_HOST
+          value: "redis-master-leader.redis-cluster.svc.cluster.local"
+        volumeMounts:
+        - name: script-volume
+          mountPath: /scripts
+      volumes:
+      - name: script-volume
+        configMap:
+          name: seed-script
+      restartPolicy: Never
+  backoffLimit: 1

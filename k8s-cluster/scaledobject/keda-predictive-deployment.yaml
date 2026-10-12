@@ -1,0 +1,22 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: redis-predictive-scaler
+  namespace: redis-cluster
+spec:
+  scaleTargetRef:
+    apiVersion: redis.redis.opstreelabs.in/v1beta1
+    kind: RedisCluster
+    name: redis-cluster
+  minReplicaCount: 3
+  maxReplicaCount: 9
+  pollingInterval: 15
+  cooldownPeriod: 300
+  triggers:
+  - type: prometheus
+    metadata:
+      serverAddress: http://prometheus-operated.monitoring.svc.cluster.local:9090
+      metricName: predicted_http_requests
+      threshold: "150" 
+      # Range vector subquery feeding into predict_linear
+      query: predict_linear(sum(rate(http_requests_total{namespace="fastapi-leaderboard"}[1m]))[5m:15s], 120)
