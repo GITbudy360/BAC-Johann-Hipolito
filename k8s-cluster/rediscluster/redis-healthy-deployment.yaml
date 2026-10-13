@@ -7,6 +7,10 @@ spec:
   clusterSize: 3
   clusterVersion: v7
   persistenceEnabled: true
+  # Force K3s to change the local-path volume ownership to the Redis user
+  podSecurityContext:
+    fsGroup: 1001
+    runAsUser: 1001
   # Redis exporter is enabled to monitor the Redis cluster
   redisExporter:
     enabled: true
