@@ -5,10 +5,13 @@ from redis.asyncio.retry import Retry
 from redis.backoff import ExponentialBackoff
 from redis.exceptions import ConnectionError, TimeoutError, RedisClusterException
 import os
+import zlib
+import asyncio
 
 # Pull Redis configuration from environment variables (useful for Kubernetes)
 REDIS_HOST = os.getenv("REDIS_HOST", "redis-master")
 REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
+NUM_SHARDS = 12
 
 # Initialize async Redis Cluster client
 redis_client = AsyncRedisCluster(
@@ -24,45 +27,67 @@ redis_client = AsyncRedisCluster(
 )
 
 app = FastAPI(title="Global Leaderboard API")
-LEADERBOARD_KEY = "global_leaderboard"
 
 
 class ScoreUpdate(BaseModel):
     score: float
 
 
+def get_shard_key(player_id: str) -> str:
+    # Deterministic hash to map a player consistently to one of the 12 shards
+    shard_index = zlib.crc32(player_id.encode('utf-8')) % NUM_SHARDS
+    return f"leaderboard:shard:{shard_index}"
+
 @app.post("/player/{player_id}/score")
 async def update_score(player_id: str, data: ScoreUpdate):
-    # ZADD adds or updates the player in the Sorted Set with their new score
-    await redis_client.zadd(LEADERBOARD_KEY, {player_id: data.score})
-    return {"player_id": player_id, "score": data.score, "status": "updated"}
-
+    shard_key = get_shard_key(player_id)
+    await redis_client.zadd(shard_key, {player_id: data.score})
+    return {"player_id": player_id, "score": data.score, "status": "updated", "shard": shard_key}
 
 @app.get("/leaderboard")
 async def get_leaderboard(top: int = 100):
-    # ZREVRANGE fetches the highest scores in descending order
-    results = await redis_client.zrevrange(LEADERBOARD_KEY, 0, top - 1, withscores=True)
-    leaderboard = []
-    for rank, (player_id, score) in enumerate(results, start=1):
-        leaderboard.append({
-            "rank": rank,
-            "player_id": player_id,
-            "score": score
-        })
-    return {"leaderboard": leaderboard}
+    # Scatter: Query all 12 shards in parallel for their top players
+    tasks = [
+        redis_client.zrevrange(f"leaderboard:shard:{i}", 0, top - 1, withscores=True) 
+        for i in range(NUM_SHARDS)
+    ]
+    shard_results = await asyncio.gather(*tasks)
 
+    # Gather: Flatten the results, sort by score descending, and slice the true top N
+    all_players = []
+    for result in shard_results:
+        for player_id, score in result:
+            all_players.append({"player_id": player_id, "score": score})
+
+    all_players.sort(key=lambda x: x["score"], reverse=True)
+    global_top = all_players[:top]
+
+    # Inject ranks
+    for rank, player in enumerate(global_top, start=1):
+        player["rank"] = rank
+
+    return {"leaderboard": global_top}
 
 @app.get("/player/{player_id}/rank")
 async def get_player_rank(player_id: str):
-    # ZREVRANK returns the 0-based index of the player, from highest to lowest score
-    rank = await redis_client.zrevrank(LEADERBOARD_KEY, player_id)
-    if rank is None:
+    shard_key = get_shard_key(player_id)
+    score = await redis_client.zscore(shard_key, player_id)
+
+    if score is None:
         raise HTTPException(status_code=404, detail="Player not found in leaderboard")
 
-    score = await redis_client.zscore(LEADERBOARD_KEY, player_id)
+    # Scatter: Ask every shard how many players have a strictly greater score
+    tasks = [
+        redis_client.zcount(f"leaderboard:shard:{i}", f"({score}", "+inf") 
+        for i in range(NUM_SHARDS)
+    ]
+    higher_scores_counts = await asyncio.gather(*tasks)
+
+    # Gather: The global rank is the sum of everyone above them, plus 1
+    global_rank = sum(higher_scores_counts) + 1
 
     return {
         "player_id": player_id,
-        "rank": rank + 1,  # Convert 0-based index to 1-based rank (e.g., 1st place)
+        "rank": global_rank,
         "score": score
     }

@@ -5,21 +5,27 @@ metadata:
   namespace: redis-cluster
 spec:
   scaleTargetRef:
-    # Target the Opstree RedisCluster CRD (Requires Opstree /scale subresource support)
-    # Alternatively, target the 'StatefulSet' of the Redis nodes directly
-    apiVersion: redis.redis.opstreelabs.in/v1beta1
+    apiVersion: redis.redis.opstreelabs.in/v1beta2
     kind: RedisCluster
-    name: redis-cluster 
+    name: redis-master 
   minReplicaCount: 3
-  maxReplicaCount: 9
-  pollingInterval: 15    # How often KEDA checks Prometheus (in seconds)
-  cooldownPeriod: 300    # Wait 5 minutes before scaling down
+  maxReplicaCount: 6
+  pollingInterval: 15
+  cooldownPeriod: 300
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleUp:
+          policies:
+          - type: Pods
+          # Ensures that the HPA will not scale up more than 1 pod at a time.
+            value: 1
+            periodSeconds: 60
   triggers:
   - type: prometheus
     metadata:
-      # Replace with your actual Prometheus service DNS
       serverAddress: http://prometheus-operated.monitoring.svc.cluster.local:9090
+      # The metricName and query below are used to scale the Redis cluster reactively based on the number of HTTP requests received by the FastAPI leaderboard application.
       metricName: http_requests_total
-      threshold: "150" # Target RPS threshold to trigger a scale-up
-      # Instant vector query: Current RPS over the last 1 minute
+      threshold: "150"
       query: sum(rate(http_requests_total{namespace="fastapi-leaderboard"}[1m]))
