@@ -11,7 +11,8 @@ REDIS_HOST = os.getenv("REDIS_HOST", "redis-master-leader.redis-cluster.svc.clus
 REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
 TOTAL_PLAYERS = 5000
 BATCH_SIZE = 500
-NUM_SHARDS = 12
+# Define the number of shards used in the leaderboard. 120 is the lowest common multiple of 3 and 4 that provides enough granularity for state migration.
+NUM_SHARDS = 120
 
 
 def get_shard_key(player_id: str) -> str:

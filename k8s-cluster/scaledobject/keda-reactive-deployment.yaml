@@ -18,7 +18,7 @@ spec:
         scaleUp:
           policies:
           - type: Pods
-          # Ensures that the HPA will not scale up more than 1 pod at a time.
+          # Ensures that the HPA will not scale up more than 1 pod at a time. This prevents the "thundering herd" problem where multiple pods are added at once, which can lead to resource contention and instability in the Redis cluster.
             value: 1
             periodSeconds: 60
   triggers:
