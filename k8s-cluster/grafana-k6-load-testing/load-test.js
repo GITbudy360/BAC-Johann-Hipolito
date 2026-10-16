@@ -73,5 +73,5 @@ export default function () {
     console.log(res.status, res.body);
   }
 
-  sleep(1);
+  //sleep(1);
 }
