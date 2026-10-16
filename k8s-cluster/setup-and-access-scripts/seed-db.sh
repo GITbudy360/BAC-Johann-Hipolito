@@ -19,6 +19,3 @@ echo "4. Executing and monitoring..."
 # Pause briefly to allow the k3s control plane to schedule the pod
 sleep 3
 sudo k3s kubectl logs -f job/seed-redis -n redis-cluster
-
-echo "5. Applying starved Redis cluster setup..."
-sudo k3s kubectl apply -f /home/itpadm/BAC-Johann-Hipolito/k8s-cluster/rediscluster/redis-starved-deployment.yaml

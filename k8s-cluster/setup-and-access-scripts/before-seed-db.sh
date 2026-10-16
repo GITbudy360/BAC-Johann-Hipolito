@@ -10,7 +10,7 @@ echo "2. Deleting existing stale Persistent Volume Claims (PVCs)..."
 sudo k3s kubectl delete pvc --all -n redis-cluster --ignore-not-found
 
 echo "3. Applying redis-healthy-deployment.yaml..."
-sudo k3s kubectl apply -f /home/itpadm/BAC-Johann-Hipolito/k8s-cluster/rediscluster/redis-healthy-deployment.yaml
+sudo k3s kubectl apply -f /home/itpadm/BAC-Johann-Hipolito/k8s-cluster/rediscluster/redis-deployment.yaml
 
 echo "4. Monitoring the Redis Cluster pods (after waiting for 30s)..."
 # Wait for the Redis pods to be ready before proceeding
