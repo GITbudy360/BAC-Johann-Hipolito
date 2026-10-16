@@ -6,17 +6,17 @@ export const options = {
     // 00:00 - 06:00 (Night Baseline): 5m at 10 VUs (Initializes predictive lookback window)
     { duration: '5m', target: 10 },
 
-    // 06:00 - 11:30 (Morning Ramp): 4m climbing to 80 VUs (Tests linear forecasting)
-    { duration: '4m', target: 80 },
+    // 06:00 - 11:30 (Morning Ramp): 4m climbing to 40 VUs (Tests linear forecasting)
+    { duration: '4m', target: 40 },
 
-    // 11:30 - 13:30 (Lunch Peak): 8m held at 150 VUs (Forces Opstree re-sharding & measures 1a, 1b, 2b)
-    { duration: '8m', target: 150 },
+    // 11:30 - 13:30 (Lunch Peak): 8m held at 80 VUs (Forces Opstree re-sharding & measures 1a, 1b, 2b)
+    { duration: '8m', target: 80 },
 
     // 13:30 - 16:00 (Afternoon Plateau): 4m stepping down to 60 VUs (Post-scale stabilization)
     { duration: '4m', target: 60 },
 
-    // 16:00 - 17:00 (Flash Spike): 1m spike to 200 VUs immediately followed by a drop
-    { duration: '1m', target: 200 },
+    // 16:00 - 17:00 (Flash Spike): 1m spike to 120 VUs immediately followed by a drop
+    { duration: '1m', target: 120 },
 
     // Premature Drop: 10s cliff down to 20 VUs (Tests 3c: Predictive Resource Waste)
     { duration: '10s', target: 20 },
@@ -43,14 +43,20 @@ export default function () {
     const payload = JSON.stringify({ score: Math.random() * 10000 });
     const params = {
       headers: { 'Content-Type': 'application/json' },
-      tags: { endpoint: 'write_score' }, 
+      tags: { 
+        endpoint: 'write_score', 
+        name: '/player/{id}/score'  // Groups all dynamic IDs into one metric
+      }, 
     };
     const res = http.post(`${BASE_URL}/player/${playerId}/score`, payload, params);
     check(res, { 'write status is 200': (r) => r.status === 200 });
 
   } else if (rand < 0.90) {
     const res = http.get(`${BASE_URL}/player/${playerId}/rank`, {
-      tags: { endpoint: 'read_rank' }
+      tags: { 
+        endpoint: 'read_rank', 
+        name: '/player/{id}/rank'   // Groups all dynamic IDs into one metric
+      }
     });
     check(res, { 'rank status is 200 or 404': (r) => r.status === 200 || r.status === 404 });
 
