@@ -22,7 +22,7 @@ redis_client = AsyncRedisCluster(
     # Prevent crashes if some hash slots are temporarily migrating during re-sharding
     require_full_coverage=False,
     # Expands the socket pool to prevent exhaustion
-    max_connections=1024,
+    max_connections=2048,
     # Retry up to 3 times with an exponential backoff (e.g., 0.1s, 0.2s, 0.4s)
     retry=Retry(ExponentialBackoff(), retries=3),
     # Force a topology refresh and retry if these specific network errors occur

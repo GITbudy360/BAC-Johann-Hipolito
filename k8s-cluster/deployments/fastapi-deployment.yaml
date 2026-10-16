@@ -5,7 +5,10 @@ metadata:
   namespace: fastapi-leaderboard
 spec:
   strategy:
-    type: Recreate
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   replicas: 3
   selector:
     matchLabels:
@@ -15,12 +18,14 @@ spec:
       labels:
         app: fastapi-leaderboard
     spec:
-      # This points to the secret created in Step 3
       imagePullSecrets:
       - name: ghcr-secret
       containers:
       - name: fastapi
         image: ghcr.io/gitbudy360/fastapi-leaderboard:v1.29
+        command: ["uvicorn"]
+        # Allows FastAPI to process the scatter-gather fan-out concurrently and highly efficiently
+        args: ["main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2", "--loop", "uvloop"]
         ports:
         - containerPort: 8000
         env:
@@ -28,13 +33,12 @@ spec:
           value: "redis-master-leader.redis-cluster.svc.cluster.local"
         resources:
           requests:
-            cpu: "500m"       
-            memory: "512Mi"   
+            cpu: "250m"       
+            memory: "256Mi"   
           limits:
-            cpu: "1000m"      
-            memory: "1Gi"     
+            cpu: "500m"      
+            memory: "512Mi"     
       affinity:
-      # ensure that the FastAPI pods are scheduled on different nodes than the Redis pods to avoid resource contention.
         podAntiAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
           - labelSelector:
