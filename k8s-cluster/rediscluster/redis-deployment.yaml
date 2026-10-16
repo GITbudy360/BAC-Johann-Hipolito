@@ -23,7 +23,7 @@ spec:
         cpu: "100m"
         memory: "128Mi"
       limits:
-        cpu: "250m"
+        cpu: "100m"
         memory: "256Mi"
   # This storage block provisions writable volumes for the pods
   storage:
