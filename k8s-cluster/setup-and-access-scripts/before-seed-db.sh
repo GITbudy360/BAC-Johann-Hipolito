@@ -14,7 +14,6 @@ sudo k3s kubectl delete pvc --all -n redis-cluster --ignore-not-found
 
 echo "4. Applying redis-deployment.yaml..."
 sudo k3s kubectl apply -f /home/itpadm/BAC-Johann-Hipolito/k8s-cluster/rediscluster/redis-deployment.yaml
-sudo k3s kubectl top pods -n redis-cluster --ignore-not-found
 
 echo "5. Monitoring the Redis Cluster pods (after waiting for 30s)..."
 # Wait for the Redis pods to be ready before proceeding
