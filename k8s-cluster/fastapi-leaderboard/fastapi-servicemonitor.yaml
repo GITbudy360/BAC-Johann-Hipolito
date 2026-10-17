@@ -4,7 +4,7 @@ metadata:
   name: fastapi-monitor
   namespace: fastapi-leaderboard
   labels:
-    # This label is critical; it tells the Prometheus Operator to pick up this monitor
+    # This label tells the Prometheus Operator to pick up this monitor
     release: prometheus
 spec:
   selector:

@@ -3,6 +3,8 @@ kind: Service
 metadata:
   name: fastapi-leaderboard-svc
   namespace: fastapi-leaderboard
+  labels:
+    app: fastapi-leaderboard
 spec:
   type: NodePort
   selector:
