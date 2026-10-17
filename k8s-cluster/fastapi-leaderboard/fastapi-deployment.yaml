@@ -23,6 +23,7 @@ spec:
       containers:
       - name: fastapi
         image: ghcr.io/gitbudy360/fastapi-leaderboard:v1.33
+        imagePullPolicy: Always
         command: ["uvicorn"]
         # Allows FastAPI to process the scatter-gather fan-out concurrently and highly efficiently
         args: ["main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
