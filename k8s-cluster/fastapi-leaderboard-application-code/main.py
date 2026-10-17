@@ -31,7 +31,7 @@ redis_client = AsyncRedisCluster(
 )
 
 app = FastAPI(title="Global Leaderboard API")
-# Exposes the /metrics endpoint
+# Exposes the /metrics endpoint. This endpoint is dynamially created by the prometheus-fastapi-instrumentator library.
 Instrumentator().instrument(app).expose(app)
 
 
