@@ -4,6 +4,7 @@ from redis.asyncio.cluster import RedisCluster as AsyncRedisCluster
 from redis.asyncio.retry import Retry
 from redis.backoff import ExponentialBackoff
 from redis.exceptions import ConnectionError, TimeoutError, RedisClusterException
+from prometheus_fastapi_instrumentator import Instrumentator
 import os
 import zlib
 import asyncio
@@ -30,6 +31,8 @@ redis_client = AsyncRedisCluster(
 )
 
 app = FastAPI(title="Global Leaderboard API")
+# Exposes the /metrics endpoint
+Instrumentator().instrument(app).expose(app)
 
 
 class ScoreUpdate(BaseModel):

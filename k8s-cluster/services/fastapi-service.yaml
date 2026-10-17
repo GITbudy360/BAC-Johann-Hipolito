@@ -6,8 +6,8 @@ metadata:
 spec:
   type: NodePort
   selector:
-    # This must perfectly match the label in your deployment template
     app: fastapi-leaderboard 
   ports:
-    - port: 8000
+    - name: http # Ensure this matches the port name in your FastAPI ServiceMonitor manifest
+      port: 8000
       targetPort: 8000

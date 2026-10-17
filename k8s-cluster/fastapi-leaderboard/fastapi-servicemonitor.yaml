@@ -1,0 +1,16 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: fastapi-monitor
+  namespace: fastapi-leaderboard
+  labels:
+    # This label is critical; it tells the Prometheus Operator to pick up this monitor
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app: fastapi-leaderboard
+  endpoints:
+  - port: http # Ensure this matches the port name in your FastAPI Service manifest
+    path: /metrics
+    interval: 15s
