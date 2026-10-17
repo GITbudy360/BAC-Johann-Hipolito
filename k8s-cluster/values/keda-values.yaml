@@ -1,0 +1,4 @@
+nodeSelector:
+  kubernetes.io/hostname: ca-crs-bak-hipolito-01
+tolerations:
+  - operator: "Exists"
