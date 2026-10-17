@@ -28,4 +28,4 @@ spec:
       # The metricName and query below are used to scale the Redis cluster predictively based on the number of HTTP requests received by the FastAPI leaderboard application.
       metricName: predicted_http_requests
       threshold: "150"
-      query: predict_linear(sum(rate(http_requests_total{namespace="fastapi-leaderboard"}[1m]))[5m:15s], 120)
+      query: predict_linear(sum(rate(http_request_duration_seconds_count{namespace="fastapi-leaderboard"}[2m]))[5m:15s], 120)

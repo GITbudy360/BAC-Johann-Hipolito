@@ -33,4 +33,4 @@ spec:
       serverAddress: http://prometheus-operated.monitoring.svc.cluster.local:9090
       metricName: http-request-rate
       threshold: "65"
-      query: sum(rate(http_requests_total{namespace="fastapi-leaderboard"}[2m]))
+      query: sum(rate(http_request_duration_seconds_count{namespace="fastapi-leaderboard"}[2m]))
