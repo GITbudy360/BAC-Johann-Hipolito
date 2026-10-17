@@ -9,23 +9,28 @@ spec:
     kind: RedisCluster
     name: redis-master 
   minReplicaCount: 3
-  maxReplicaCount: 6
+  maxReplicaCount: 4
   pollingInterval: 15
   cooldownPeriod: 300
   advanced:
     horizontalPodAutoscalerConfig:
       behavior:
         scaleUp:
+          stabilizationWindowSeconds: 0
           policies:
           - type: Pods
-          # Ensures that the HPA will not scale up more than 1 pod at a time. This prevents the "thundering herd" problem where multiple pods are added at once, which can lead to resource contention and instability in the Redis cluster.
             value: 1
-            periodSeconds: 60
+            periodSeconds: 180
+        scaleDown:
+          stabilizationWindowSeconds: 300
+          policies:
+          - type: Pods
+            value: 1
+            periodSeconds: 120
   triggers:
   - type: prometheus
     metadata:
       serverAddress: http://prometheus-operated.monitoring.svc.cluster.local:9090
-      # The metricName and query below are used to scale the Redis cluster reactively based on the number of HTTP requests received by the FastAPI leaderboard application.
-      metricName: http_requests_total
-      threshold: "150"
-      query: sum(rate(http_requests_total{namespace="fastapi-leaderboard"}[1m]))
+      metricName: http-request-rate
+      threshold: "65"
+      query: sum(rate(http_requests_total{namespace="fastapi-leaderboard"}[2m]))
