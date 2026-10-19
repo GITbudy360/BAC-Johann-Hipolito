@@ -7890,7 +7890,7 @@ spec:
       scale:
         # This is the path to the field in the custom resource that specifies the desired number of replicas.
         specReplicasPath: .spec.clusterSize
-        statusReplicasPath: .spec.clusterSize
+        statusReplicasPath: .status.readyLeaderReplicas
 status:
   acceptedNames:
     kind: RedisCluster
