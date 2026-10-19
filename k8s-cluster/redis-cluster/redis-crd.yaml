@@ -7887,6 +7887,10 @@ spec:
     storage: true
     subresources:
       status: {}
+      scale:
+        # This is the path to the field in the custom resource that specifies the desired number of replicas.
+        specReplicasPath: .spec.clusterSize
+        statusReplicasPath: .spec.clusterSize
 status:
   acceptedNames:
     kind: RedisCluster
