@@ -25,7 +25,7 @@ spec:
   - type: prometheus
     metadata:
       serverAddress: http://prometheus-operated.monitoring.svc.cluster.local:9090
-      # The metricName and query below are used to scale the Redis cluster predictively based on the number of HTTP requests received by the FastAPI leaderboard application.
       metricName: predicted_http_requests
-      threshold: "150"
-      query: predict_linear(sum(rate(http_request_duration_seconds_count{namespace="fastapi-leaderboard"}[2m]))[5m:15s], 120)
+      metricType: Value     # Forces the raw 65 RPS threshold instead of an   average
+      threshold: "65"
+      query: predict_linear(sum(rate(http_request_duration_seconds_count{namespace="fastapi-leaderboard"}[2m]))[5m:15s], 120) or vector(0)
