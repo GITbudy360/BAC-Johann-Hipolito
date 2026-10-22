@@ -27,13 +27,13 @@ def log(msg: str):
 
 
 def get_prometheus_endpoint() -> str:
-    """Find the active Prometheus ClusterIP or fall back to localhost."""
+    """Find the active Prometheus Pod IP directly."""
     try:
         cmd = [
-            "sudo","k3s","kubectl","get","svc","prometheus-operated","-n","monitoring","-o","jsonpath={.spec.clusterIP}",
+            "sudo","k3s","kubectl","get","pods","-n","monitoring","-l","app.kubernetes.io/name=prometheus","-o","jsonpath={.items[0].status.podIP}",
         ]
         ip = subprocess.check_output(cmd, text=True).strip()
-        if ip:
+        if ip and ip.lower() != "none":
             return f"http://{ip}:9090"
     except Exception:
         pass
