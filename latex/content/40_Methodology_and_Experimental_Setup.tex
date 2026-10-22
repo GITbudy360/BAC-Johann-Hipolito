@@ -5,6 +5,8 @@
 \subsection{Experimental Setup}
 \label{subsec:setup}
 
+    This section details the foundational infrastructure constructed to evaluate the selected autoscaling methodologies. It outlines the underlying virtualization environment, the internal network routing, and the deployment configurations for both the stateful Redis cluster and the FastAPI backend. Establishing this controlled architecture ensures a consistent and reproducible baseline for the   subsequent load simulation and metric evaluation phases.
+
 \begin{figure}[htbp]
     \centering
     \caption{High-level architecture overview of the experimental setup.}
@@ -15,20 +17,139 @@
 \subsubsection{Virtualisation Environment}
 \label{subsubsec:ve}
 
+    The experimental infrastructure was hosted within the FH Joanneum university cloud network, utilizing Proxmox as the underlying virtualization platform. To establish an isolated and reproducible testing environment, a dedicated pool of five Virtual Machines (VMs) was provisioned.
+    As illustrated in the high-level architecture overview, these five VMs (ca-crs-bak-hipolito-01 through 05) are logically partitioned into three distinct operational roles:
+    \begin{itemize}
+        \item Control and Monitoring Node (1 VM): Provisioned at IP 192.168.99.1, this node manages the Kubernetes control plane via kubeadm and centralizes the infrastructure's management services, including Prometheus, Grafana, KEDA, and the Redis Custom Operator. To ensure workload stability and prevent resource contention with the primary applications, a taint is applied to this node; only administrative and monitoring pods configured with the appropriate tolerations are scheduled here.
+
+        \item Worker Nodes (3 VMs): Provisioned at IPs 192.168.99.2, 192.168.99.3, and 192.168.99.4, these machines execute the core experimental workloads. They host the distributed FastAPI application instances and the stateful Redis Master pods required for the autoscaling evaluation.
+
+        \item Load Simulation Node (1 VM): Operating at IP 192.168.99.5, this machine is strictly dedicated to generating simulated traffic using Grafana k6. Isolating the load simulator on a separate VM prevents the computational overhead of the test generation from skewing the performance metrics and CPU utilization of the worker nodes.   
+     
+    \end{itemize}
+
 \subsubsection{Routing}
 \label{subsubsec:routing}
+
+    External access to the experimental environment within the FH Network is securely established from a local machine via an SSH tunnel. This tunnel bridges the external connection to the internal network infrastructure, which handles traffic direction to the designated virtual machines. 
+    
+    The routing architecture employs a dual-network IP strategy to manage traffic flow:
+    \begin{itemize}
+        \item Administrative and Simulator Access: Intermediate network IPs map traffic to the internal virtual machine subnet. Specifically, the IP address 10.221.24.80 routes to the main control and monitoring node at 192.168.99.1, while 10.221.48.4 provides direct routing to the dedicated load simulator node at 192.168.99.5.
+        \item Application Traffic Distribution: Traffic intended for the backend application is directed to a Kubernetes service named fastapi-leaderboard-svc. This service is explicitly configured as a NodePort, acting as the primary entry point for application requests and balancing the incoming traffic across the FastAPI pods residing on the three worker nodes.   
+
+    \end{itemize}
+
+\begin{table}[htbp]
+    \centering
+    \begin{tabular}{|l|l|l|}
+        \hline
+        \textbf{Hostname} & \textbf{External IP Address(eth0)} & \textbf{Internal IP Address (eth1)} \\
+        \hline
+        ca-crs-bak-hipolito-01 & 10.221.24.80 & 192.168.99.1/24 \\
+        ca-crs-bak-hipolito-02 & 10.221.24.81 & 192.168.99.2/24 \\
+        ca-crs-bak-hipolito-03 & 10.221.24.82 & 192.168.99.3/24 \\
+        ca-crs-bak-hipolito-04 & 10.221.24.83 & 192.168.99.4/24 \\
+        ca-crs-bak-hipolito-05 & 10.221.48.84 & 192.168.99.5/24 \\
+        \hline
+        \end{tabular}
+    \caption{IP allocation and node roles within the Proxmox virtualisation environment.}
+    \label{tab:infrastructure_ips}
+\end{table}
 
 \subsubsection{Redis Cluster Configuration}
 \label{subsubsec:redis-cluster-configuration}
 
+    The stateful data tier of the experimental architecture consists of a distributed Redis cluster managed by a Redis Custom Operator, utilizing the Opstree Redis Operator. To maintain a strict separation of control and data planes, the operator itself is deployed on the main control and monitoring node (ca-crs-bak-hipolito-01).
+
+    The core database workloads are handled by three distinct Redis Master pods. These pods are explicitly distributed across the three available worker nodes (ca-crs-bak-hipolito-02, ca-crs-bak-hipolito-03, and ca-crs-bak-hipolito-04) to ensure high availability and replicate a robust stateful deployment topology.
+    
+    For telemetry and observability, each Redis Master pod is provisioned with an attached Redis Servicemonitor sidecar. These sidecar containers expose real-time performance and resource utilization metrics, which are continuously scraped by the central Prometheus instance located on the control node. This metric aggregation pipeline establishes the foundational data source required for the autoscaling mechanisms evaluated in the subsequent sections.   
+
 \subsubsection{FastAPI Application Design}
 \label{subsubsec:fastapi-application-design}
+
+    The FastAPI application serves as the computational backend for the experimental setup, handling incoming simulated traffic routed through the \texttt{fastapi-leaderboard-svc} NodePort service. The application provides a RESTful interface designed to manage distributed leaderboard operations, exposing three primary endpoints for the virtual users:
+
+    \begin{itemize}
+        \item \texttt{POST /player/\{player\_id\}/score}: Processes write pressure by accepting a player ID and a new score payload. It routes the update to the appropriate database shard and utilizes the Redis \texttt{ZADD} command to update the player's standing.
+        \item \texttt{GET /leaderboard}: Handles read workloads by retrieving the top $N$ players globally. It accepts an optional query parameter to define the slice size and returns the highest-scoring players alongside their injected ranks.
+        \item \texttt{GET /player/\{player\_id\}/rank}: Retrieves the specific global rank of an individual player. If the player exists, it returns their exact score and calculates their global standing.
+    \end{itemize}
+
+    To manage data distribution across the Redis Master pods residing on the worker nodes (\texttt{ca-crs-bak-hipolito-02}, \texttt{ca-crs-bak-hipolito-03}, and \texttt{ca-crs-bak-hipolito-04}), the FastAPI backend implements application-level sharding coupled with an asynchronous Scatter-Gather architecture. The global leaderboard is logically partitioned into 12 distinct shards.   
+
+    For write operations, the application employs a deterministic hashing function (\texttt{zlib.crc32}) against the UTF-8 encoded \texttt{player\_id}. A modulo operation assigns the player consistently to one of the 12 shards, ensuring uniform data distribution.
+
+    For read operations requiring a global view, the application executes a Scatter-Gather pattern. It leverages Python's \texttt{asyncio.gather} to scatter parallel read requests---such as \texttt{ZREVRANGE} for fetching top players or \texttt{ZCOUNT} for calculating rank offsets---across all 12 shards simultaneously. Once the application collects all shard responses, it gathers the data in memory, flattens and sorts the arrays, and computes the final global state before returning the response payload. This design distributes the computational load of sorting and ranking across the entire stateful backend cluster.
 
 \subsection{Autoscaling Configuration}
 \label{subsec:autoscaling-configuration}
 
+    This section details the infrastructure engineered to execute the reactive and predictive autoscaling methodologies. It outlines the original architectural intent, the integration challenges encountered with the stateful data tier, and the final custom software developed to orchestrate automated scaling events.
+
+\subsubsection{Initial Design and Configuration}
+\label{subsubsec:initial-design-and-configuration}
+
+    The preliminary architecture utilized Kubernetes Event-driven Autoscaling (KEDA) to manage the Redis cluster's capacity by deploying \texttt{ScaledObject} manifests targeting the Opstree \texttt{RedisCluster} Custom Resource Definition. KEDA was configured to poll the in-cluster Prometheus service (\path{http://prometheus-operated.monitoring.svc.cluster.local:9090}) every 15 seconds to evaluate scaling rules based on HTTP request rates. To prevent metric evaluation errors during periods of absolute zero traffic, all PromQL queries were appended with the \texttt{or vector(0)} modifier.
+
+    Two distinct \texttt{ScaledObject} configurations were designed to evaluate the reactive and predictive paradigms:
+
+    \begin{itemize}
+        \item \textbf{Reactive Autoscaler:} This configuration defined a cluster size between 3 and 4 replicas. It utilized a direct PromQL query to calculate the immediate Requests Per Second (RPS) over a two-minute rolling window (\path{sum(rate(http_request_duration_seconds_count{namespace="fastapi-leaderboard"}[2m]))}). The scale-up trigger was set to a raw threshold of 65 RPS. To control scaling velocity, the underlying Horizontal Pod Autoscaler (HPA) was configured with a 0-second stabilization window for scaling up, limiting the addition to 1 pod every 180 seconds. For scaling down, it enforced a 300-second stabilization window, removing at most 1 pod every 120 seconds to prevent destructive cluster oscillation.
+        \item \textbf{Predictive Autoscaler:} Designed to handle more dynamic load variations, this configuration expanded the maximum limit to 6 replicas. It employed the PromQL \texttt{predict\_linear} function (\texttt{predict\_linear(sum(rate(...[2m]))[5m:15s], 120)}) to analyze the HTTP request rate over the preceding 5 minutes, projecting anticipated traffic 120 seconds into the future. If the forecasted traffic breached the 65 RPS threshold, KEDA preemptively initiated a scale-up event. To maintain cluster stability and prevent the ``thundering herd'' problem---where multiple pods are provisioned simultaneously, leading to severe resource contention during state rebalancing---the HPA scale-up policy was strictly throttled to add only 1 pod every 60 seconds.
+    \end{itemize}
+
+\subsubsection{Technical Constraint}
+\label{subsubsec:constraint}
+
+    During the initial load testing phases, a fundamental architectural mismatch was identified between KEDA and the Opstree Redis Operator. KEDA natively interfaces with standard Kubernetes workload resources (such as Deployments or StatefulSets) or CRDs that expose a standard \texttt{/scale} subresource. However, scaling a distributed Redis cluster requires state-aware operations, including provisioning new Master pods and safely rebalancing the 16,384 logical hash slots across the new topology. KEDA lacked the native capability to orchestrate these complex, operator-specific patching sequences, rendering direct integration unviable without a dedicated middleware bridge.
+
+\subsubsection{Working Design}
+\label{subsubsec:working-design}
+
+    To bypass the KEDA integration constraints, a custom Python-based autoscaling daemon was developed to serve as a direct bridge between the cluster telemetry and the Opstree Redis Operator. Operating from the central control node, this daemon runs as a continuous background process, managing the scaling lifecycle through a defined polling interval of 10 seconds.
+
+    The daemon retrieves real-time traffic metrics by querying the active Prometheus HTTP API. Specifically, it executes a PromQL query to calculate the aggregate Requests Per Second (RPS) processed by the FastAPI application over a two-minute rolling window (\path{sum(rate(http_request_duration_seconds_count{namespace="fastapi-leaderboard"}[2m]))}). 
+
+    Scaling decisions are governed by a defined threshold of 65.0 RPS:
+    \begin{itemize}
+        \item \textbf{Scale-Up Event:} If the aggregated RPS breaches the 65.0 threshold, the daemon immediately triggers a scale-up event. It utilizes Python's \texttt{subprocess} module to execute a \texttt{kubectl patch} command, modifying the \texttt{clusterSize} specification of the \texttt{RedisCluster} Custom Resource Definition (CRD) via a merge patch. This increases the stateful replica count from the baseline of 3 to a maximum of 4 nodes.
+        \item \textbf{Scale-Down Event (Stabilization Window):} To prevent destructive oscillation---or ``flapping''---during transient traffic dips, the daemon implements a 300-second (5-minute) cooldown period. The incoming traffic must consistently remain below the 65.0 RPS threshold for the entire duration of this stabilization window before the daemon patches the CRD to scale the cluster back down to 3 replicas. 
+    \end{itemize}
+
+    By programmatically patching the CRD directly, this daemon forces the Opstree Operator to acknowledge the updated \texttt{clusterSize}. This successfully delegates the complex tasks of pod provisioning and hash slot rebalancing to the operator while maintaining absolute control over the custom autoscaling logic.
+
 \subsection{Load Simulation}
 \label{subsec:load-simulation}
+
+    To systematically evaluate the autoscaling configurations, a comprehensive load testing suite was implemented using Grafana k6. The simulation is executed from the dedicated load simulator node (\texttt{ca-crs-bak-hipolito-05})[cite: 1] to ensure test generation overhead does not interfere with the worker nodes processing the traffic. The k6 script targets the FastAPI NodePort service exposed at \texttt{http://ca-crs-bak-hipolito-01:31964}.
+
+\subsubsection{Workload Distribution}
+    The simulation models realistic user behavior across a population pool of 5,000 distinct virtual players. Each Virtual User (VU) executes a continuous loop with a one-second pause between requests. To accurately reflect a read-heavy gaming leaderboard scenario, the script employs randomized branching to distribute traffic across the three API endpoints:
+    \begin{itemize}
+        \item \textbf{Write Operations (20\%):} Submits new randomized scores via \texttt{POST /player/\{id\}/score}.
+        \item \textbf{Rank Reads (70\%):} Queries individual player standings via \texttt{GET /player/\{id\}/rank}.
+        \item \textbf{Global Reads (10\%):} Retrieves the top 100 players via \texttt{GET /leaderboard?top=100}.
+    \end{itemize}
+
+\subsubsection{Simulation Stages}
+\label{subsubsec:simulation}
+    The test executes a precise 31-minute load profile designed to simulate a full daily traffic cycle, exposing both auto
+    scaling paradigms to various rate-of-change scenarios:
+    \begin{itemize}
+        \item \textbf{Night Baseline (0:00 -- 5:00):} Holds steady at 10 VUs. This establishes a baseline and allows the predictive algorithm's 5-minute lookback window to initialize with valid telemetry data.
+        \item \textbf{Morning Ramp (5--9 min):} A gradual climb to 40 VUs to evaluate how effectively the linear forecasting anticipates a steady upward trend.
+        \item \textbf{Lunch Peak (9--17 min):} Sustained heavy pressure at 80 VUs. This forces the Opstree Operator to execute pod provisioning and data re-sharding under load.
+        \item \textbf{Afternoon Plateau (17--21 min):} A step down to 60 VUs to measure post-scale stabilization and resource utilization.
+        \item \textbf{Flash Spike (21--22 min):} An aggressive 1-minute burst to 120 VUs, simulating sudden application virality.
+        \item \textbf{Premature Drop (22 min):} A sudden 10-second cliff dropping from 120 down to 20 VUs. This specifically tests predictive resource waste, evaluating whether the predictive scaler provisions unnecessary pods right as the traffic vanishes.
+        \item \textbf{Cooldown (22--31 min):} A sustained low-traffic period at 20 VUs (tapering to 0) to observe idle pod allocation and the execution of the 5-minute scale-down stabilization window.
+    \end{itemize}
+
+\subsubsection{Performance Thresholds}
+\label{subsubsec:performance}
+    To automatically quantify system degradation, Service Level Agreement (SLA) thresholds are integrated directly into the k6 script. Latency is tracked per endpoint across the 50th, 95th, and 99th percentiles (p50, p95, p99). For instance, the computationally expensive global leaderboard read requires a p99 latency below 1500\,ms, whereas individual rank reads require a p99 below 600\,ms. If the autoscaling mechanisms fail to provision resources fast enough, the resulting latency spikes will exceed these defined thresholds, providing concrete failure points for evaluation.
 
 \subsection{Evaluation Metrics and Data Collection}
 \label{subsec:evaluation-metrics-and-data-collection}
