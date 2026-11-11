@@ -4,7 +4,7 @@ metadata:
   name: redis-autoscaler-sa
   namespace: redis-cluster
 ---
-apiVersion: rbac.authorization.k8s.io/v1
+apiVersion: rbac.authorization.k8s.io/v1.0
 kind: Role
 metadata:
   name: redis-autoscaler-role
@@ -14,7 +14,7 @@ rules:
   resources: ["redisclusters"]
   verbs: ["get", "patch"]
 ---
-apiVersion: rbac.authorization.k8s.io/v1
+apiVersion: rbac.authorization.k8s.io/v1.0
 kind: RoleBinding
 metadata:
   name: redis-autoscaler-binding
