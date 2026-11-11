@@ -1,0 +1,49 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: redis-autoscaler-sa
+  namespace: redis-cluster
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: redis-autoscaler-role
+  namespace: redis-cluster
+rules:
+- apiGroups: ["redis.redis.opstreelabs.in"]
+  resources: ["redisclusters"]
+  verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: redis-autoscaler-binding
+  namespace: redis-cluster
+subjects:
+- kind: ServiceAccount
+  name: redis-autoscaler-sa
+roleRef:
+  kind: Role
+  name: redis-autoscaler-role
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis-autoscaler
+  namespace: redis-cluster
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis-autoscaler
+  template:
+    metadata:
+      labels:
+        app: redis-autoscaler
+    spec:
+      serviceAccountName: redis-autoscaler-sa
+      containers:
+      - name: autoscaler
+        image: redis-autoscaler:v1
+        imagePullPolicy: Never
