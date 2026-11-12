@@ -18,8 +18,8 @@ spec:
       labels:
         app: fastapi-leaderboard
     spec:
-      imagePullSecrets:
-      - name: ghcr-secret
+#      imagePullSecrets:
+#      - name: ghcr-secret
       containers:
       - name: fastapi
         image: ghcr.io/gitbudy360/fastapi-leaderboard:v1.33
