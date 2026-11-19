@@ -14,6 +14,7 @@ spec:
     matchLabels:
       # Insert the label you identified in Step 1 here
       app: redis-master-leader 
+      app.kubernetes.io/component: metrics
   endpoints:
     # 'redis-exporter' is the default port name provisioned by Opstree
     - port: redis-exporter 
