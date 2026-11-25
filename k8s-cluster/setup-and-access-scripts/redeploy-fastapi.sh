@@ -5,8 +5,8 @@ set -e
 
 NAMESPACE="fastapi-leaderboard"
 DEPLOYMENT="fastapi-leaderboard"
-DEPLOYMENT_MANIFEST="/home/itpadm/BAC-Johann-Hipolito/k8s-cluster/fastapi-leaderboard/fastapi-deployment.yaml"
-SERVICEMONITOR_MANIFEST="/home/itpadm/BAC-Johann-Hipolito/k8s-cluster/fastapi-leaderboard/fastapi-servicemonitor.yaml"
+DEPLOYMENT_MANIFEST="/home/itpadm/BAC-Johann-Hipolito/k8s-cluster/fastapi-leaderboard-deployment/fastapi-deployment.yaml"
+SERVICEMONITOR_MANIFEST="/home/itpadm/BAC-Johann-Hipolito/k8s-cluster/fastapi-leaderboard-deployment/fastapi-servicemonitor.yaml"
 
 echo "1. Applying FastAPI Deployment and ServiceMonitor manifests..."
 sudo k3s kubectl apply -f "$DEPLOYMENT_MANIFEST"
