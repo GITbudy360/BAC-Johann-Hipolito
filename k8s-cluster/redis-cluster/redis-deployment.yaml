@@ -34,6 +34,8 @@ spec:
           requests:
             storage: 1Gi
   redisLeader:
+    redisConfig:
+      additionalRedisConfig: redis-external-config
     affinity:
       podAntiAffinity:
         preferredDuringSchedulingIgnoredDuringExecution:
@@ -46,3 +48,6 @@ spec:
                 values:
                 - redis-master-leader
             topologyKey: "kubernetes.io/hostname"
+  redisFollower:
+    redisConfig:
+      additionalRedisConfig: redis-external-config
