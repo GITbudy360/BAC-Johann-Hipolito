@@ -15,13 +15,22 @@ if [ "$CLUSTER_STATE" != "cluster_state:ok" ]; then
   exit 1
 fi
 
-echo "2. Flushing all data from Redis master pods (keeping topology intact)..."
+echo "2. Verifying cluster topology (checking for ghost or failed nodes)..."
+BAD_NODES=$(sudo k3s kubectl exec redis-master-leader-0 -n "$NAMESPACE" -c redis-master-leader -- redis-cli CLUSTER NODES | grep -cE "fail|noaddr|disconnected" || true)
+echo "   Unhealthy/ghost nodes found: $BAD_NODES"
+
+if [ "$BAD_NODES" -gt 0 ]; then
+  echo "ERROR: Found $BAD_NODES unhealthy/ghost nodes in CLUSTER NODES. Hard reset required."
+  exit 1
+fi
+
+echo "3. Flushing all data from Redis master pods (keeping topology intact)..."
 for POD in "${MASTERS[@]}"; do
   echo -n "   Flushing $POD... "
   sudo k3s kubectl exec "$POD" -n "$NAMESPACE" -c redis-master-leader -- redis-cli FLUSHALL
 done
 
-echo "3. Verifying all master pods are empty (DBSIZE == 0)..."
+echo "4. Verifying all master pods are empty (DBSIZE == 0)..."
 for POD in "${MASTERS[@]}"; do
   KEYS=$(sudo k3s kubectl exec "$POD" -n "$NAMESPACE" -c redis-master-leader -- redis-cli DBSIZE | tr -d '\r')
   echo "   $POD key count: $KEYS"
@@ -31,7 +40,7 @@ for POD in "${MASTERS[@]}"; do
   fi
 done
 
-echo "4. Confirming cluster state is ready for seed-db.sh..."
+echo "5. Confirming cluster state is ready for seed-db.sh..."
 sudo k3s kubectl exec redis-master-leader-0 -n "$NAMESPACE" -c redis-master-leader -- redis-cli cluster info | grep -E "cluster_state|cluster_slots_ok|cluster_known_nodes"
 
 echo "Done! Cluster topology is preserved and ready for seeding."
