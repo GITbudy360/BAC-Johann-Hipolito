@@ -23,7 +23,7 @@ redis_client = AsyncRedisCluster(
     # Prevent crashes if some hash slots are temporarily migrating during re-sharding
     require_full_coverage=False,
     # changed to a lower socket count to avoid socket exhaustion during high load
-    max_connections=64,
+    max_connections=512,
     # Socket timeouts to avoid empty sockets being held indefinitely during network issues
     socket_timeout=5.0,
     socket_connect_timeout=5.0,
