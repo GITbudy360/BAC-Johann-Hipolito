@@ -51,3 +51,9 @@ spec:
   redisFollower:
     redisConfig:
       additionalRedisConfig: redis-external-config
+  livenessProbe:
+    failureThreshold: 10
+    initialDelaySeconds: 15
+    periodSeconds: 15
+    successThreshold: 1
+    timeoutSeconds: 5
