@@ -6,3 +6,4 @@ metadata:
 data:
   redis-additional.conf: |
     timeout 60
+    cluster-node-timeout 30000
